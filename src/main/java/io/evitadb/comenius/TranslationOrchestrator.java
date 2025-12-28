@@ -14,7 +14,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Collection;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
@@ -53,11 +52,11 @@ public final class TranslationOrchestrator {
 	 * Creates a translation job for a file, or returns empty if the file should be skipped.
 	 * Validates git state and determines whether this is a new or incremental translation.
 	 *
-	 * @param sourceFile       the source markdown file
-	 * @param sourceContent    the content of the source file
-	 * @param targetDir        the target directory for translations
-	 * @param locale           the target locale
-	 * @param instructionFiles the instruction files to combine
+	 * @param sourceFile    the source markdown file
+	 * @param sourceContent the content of the source file
+	 * @param targetDir     the target directory for translations
+	 * @param locale        the target locale
+	 * @param instructions  accumulated instructions from `.comenius-instructions` files (may be null)
 	 * @return Optional containing the job, or empty if file should be skipped
 	 * @throws IOException if an I/O error occurs
 	 */
@@ -67,13 +66,12 @@ public final class TranslationOrchestrator {
 		@Nonnull String sourceContent,
 		@Nonnull Path targetDir,
 		@Nonnull Locale locale,
-		@Nonnull Collection<Path> instructionFiles
+		@Nullable String instructions
 	) throws IOException {
 		Objects.requireNonNull(sourceFile, "sourceFile must not be null");
 		Objects.requireNonNull(sourceContent, "sourceContent must not be null");
 		Objects.requireNonNull(targetDir, "targetDir must not be null");
 		Objects.requireNonNull(locale, "locale must not be null");
-		Objects.requireNonNull(instructionFiles, "instructionFiles must not be null");
 
 		final Path relativePath = this.sourceDir.relativize(sourceFile.toAbsolutePath().normalize());
 
@@ -86,9 +84,6 @@ public final class TranslationOrchestrator {
 
 		// Calculate target file path
 		final Path targetFile = targetDir.resolve(relativePath);
-
-		// Load and combine instructions
-		final String instructions = loadAndCombineInstructions(instructionFiles);
 
 		// Check if target file exists and get its commit field
 		String translatedCommit = null;
@@ -174,36 +169,5 @@ public final class TranslationOrchestrator {
 	 */
 	public void reportUpToDate(@Nonnull Path relativePath) {
 		this.log.info("[SKIP] " + relativePath + " (up to date)");
-	}
-
-	/**
-	 * Loads and combines instruction files into a single string.
-	 *
-	 * @param instructionFiles the instruction file paths
-	 * @return combined instructions or null if none
-	 */
-	@Nullable
-	private String loadAndCombineInstructions(@Nonnull Collection<Path> instructionFiles) {
-		if (instructionFiles.isEmpty()) {
-			return null;
-		}
-
-		final StringBuilder sb = new StringBuilder();
-		for (final Path instrFile : instructionFiles) {
-			if (Files.exists(instrFile)) {
-				try {
-					final String content = Files.readString(instrFile, StandardCharsets.UTF_8);
-					if (!content.isBlank()) {
-						if (sb.length() > 0) {
-							sb.append("\n\n");
-						}
-						sb.append(content.trim());
-					}
-				} catch (IOException e) {
-					this.log.warn("Failed to read instruction file: " + instrFile + ": " + e.getMessage());
-				}
-			}
-		}
-		return sb.length() > 0 ? sb.toString() : null;
 	}
 }

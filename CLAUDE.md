@@ -47,7 +47,7 @@ public CompletionStage<String> translate(
 - Avoid unnecessary memory allocations
 - Avoid unnecessary object boxing
 - Avoid using exceptions for control flow
-- Cache computed values when appropriate (see `Traverser.computeInstructionFiles`)
+- Cache computed values when appropriate (see `Traverser.computeInstructions`)
 
 ## Package Structure
 
@@ -67,7 +67,7 @@ io.evitadb.comenius/
 ### Visitor Pattern
 The `Visitor` interface enables pluggable file processing:
 ```java
-void visit(Path file, String content, Collection<Path> instructionFiles)
+void visit(Path file, String content, @Nullable String instructions)
 ```
 
 ### Async/CompletionStage Pattern
@@ -154,9 +154,9 @@ public class TraverserTest {
 ## Project-Specific Conventions
 
 ### Instruction File System
-Per-directory translation configuration via manifest files:
-- `.comenius-instructions` - Lists instruction files (comma-delimited)
-- `.comenius-instructions.replace` - Resets instruction accumulation
+Per-directory translation instructions:
+- `.comenius-instructions` - Contains translation instructions directly (accumulated from parent dirs)
+- `.comenius-instructions.replace` - Resets instruction accumulation and starts fresh
 
 ### Path Handling
 - Normalize all paths: `.toAbsolutePath().normalize()`
@@ -187,5 +187,5 @@ Objects.requireNonNull(markdown, "markdown must not be null");
 
 ### Implementing New Visitor Logic
 1. Create implementation of `Visitor` interface
-2. Handle `file`, `content`, and `instructionFiles` parameters
+2. Handle `file`, `content`, and `instructions` parameters
 3. Use with `Traverser.traverse()`

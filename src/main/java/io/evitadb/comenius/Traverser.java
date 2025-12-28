@@ -1,6 +1,7 @@
 package io.evitadb.comenius;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -15,14 +16,14 @@ import java.util.regex.Pattern;
 
 /**
  * Traverses a source directory recursively, finds files matching a regex pattern and
- * invokes a visitor with the full file contents and ordered instruction files.
+ * invokes a visitor with the full file contents and accumulated instructions.
  *
  * - Traversal order is deterministic: files are visited in lexicographical order of their paths.
  * - Entire file contents are read using UTF-8.
- * - Accumulates instruction files from special manifest files named ".comenius-instructions" and
+ * - Accumulates instructions from files named ".comenius-instructions" and
  *   ".comenius-instructions.replace" present in directories from the root to the file's parent.
- *   Each manifest contains a comma-delimited list of filenames that should be composed in order.
- *   When a ".comenius-instructions.replace" is encountered at some level, parent manifests are
+ *   Each file directly contains custom translation instructions that are accumulated.
+ *   When a ".comenius-instructions.replace" is encountered at some level, parent instructions are
  *   ignored and accumulation restarts from that level.
  */
 public final class Traverser {
@@ -72,7 +73,7 @@ public final class Traverser {
 		collectFiles(this.sourceDir, files);
 		files.sort(Comparator.comparing(Path::toString));
 
-		final Map<Path, List<Path>> dirInstructionsCache = new HashMap<>();
+		final Map<Path, String> dirInstructionsCache = new HashMap<>();
 		for (final Path file : files) {
 			final String p = file.toString();
 			if (!this.filePattern.matcher(p).matches()) {
@@ -81,8 +82,8 @@ public final class Traverser {
 			final byte[] bytes = Files.readAllBytes(file); // single allocation for performance
 			final String content = new String(bytes, StandardCharsets.UTF_8);
 			final Path parent = file.getParent();
-			final List<Path> instructionFiles = parent == null ? List.of() : computeInstructionFiles(parent, dirInstructionsCache);
-			this.visitor.visit(file, content, instructionFiles);
+			final String instructions = parent == null ? null : computeInstructions(parent, dirInstructionsCache);
+			this.visitor.visit(file, content, instructions);
 		}
 	}
 
@@ -104,57 +105,67 @@ public final class Traverser {
 		}
 	}
 
-	@Nonnull
-	private List<Path> computeInstructionFiles(@Nonnull final Path dir, @Nonnull final Map<Path, List<Path>> cache) throws IOException {
-		final List<Path> cached = cache.get(dir);
-		if (cached != null) {
-			return cached;
+	/**
+	 * Computes accumulated instructions for a directory by reading `.comenius-instructions`
+	 * files from parent directories down to the specified directory.
+	 *
+	 * @param dir   the directory to compute instructions for
+	 * @param cache cache of already computed instructions per directory
+	 * @return accumulated instructions or null if none found
+	 * @throws IOException if reading instruction files fails
+	 */
+	@Nullable
+	private String computeInstructions(@Nonnull final Path dir, @Nonnull final Map<Path, String> cache) throws IOException {
+		if (cache.containsKey(dir)) {
+			return cache.get(dir);
 		}
 
 		final Path parent = dir.getParent();
-		// Start with parent's accumulated instruction files unless this dir contains a replace marker
+		// Start with parent's accumulated instructions unless this dir contains a replace marker
 		final boolean replaceHere = Files.exists(dir.resolve(INSTRUCTIONS_REPLACE_FILE));
-		final List<Path> result = new ArrayList<>(8);
+		final StringBuilder result = new StringBuilder();
+
 		if (!replaceHere && parent != null) {
-			final List<Path> parentInstr = computeInstructionFiles(parent, cache);
-			// copy to avoid aliasing cached lists
-			result.addAll(parentInstr);
+			final String parentInstr = computeInstructions(parent, cache);
+			if (parentInstr != null) {
+				result.append(parentInstr);
+			}
 		}
+
 		// If replaceHere, we intentionally ignore parent instructions and start fresh,
-		// but we also include the files listed by the replace file itself as starting instructions.
+		// but we also include the content from the replace file itself as starting instructions.
 		if (replaceHere) {
 			final Path replacePath = dir.resolve(INSTRUCTIONS_REPLACE_FILE);
-			appendManifestEntries(dir, replacePath, result);
+			appendInstructionContent(replacePath, result);
 		}
 
 		// Append this directory's instructions if present
 		final Path instrPath = dir.resolve(INSTRUCTIONS_FILE);
 		if (Files.exists(instrPath)) {
-			appendManifestEntries(dir, instrPath, result);
+			appendInstructionContent(instrPath, result);
 		}
 
-		// Cache an immutable snapshot (defensive copy)
-		final List<Path> snapshot = List.copyOf(result);
-		cache.put(dir, snapshot);
-		return snapshot;
+		// Cache the result (null if empty)
+		final String instructions = result.length() > 0 ? result.toString() : null;
+		cache.put(dir, instructions);
+		return instructions;
 	}
 
-	private void appendManifestEntries(@Nonnull final Path dir, @Nonnull final Path manifest, @Nonnull final List<Path> out) throws IOException {
-		final byte[] bytes = Files.readAllBytes(manifest);
-		final String txt = new String(bytes, StandardCharsets.UTF_8);
-		if (txt.isEmpty()) return;
-		// Split by comma, trim whitespace around tokens; ignore blanks
-		int start = 0;
-		for (int i = 0; i <= txt.length(); i++) {
-			final boolean atEnd = i == txt.length();
-			if (atEnd || txt.charAt(i) == ',') {
-				final String token = txt.substring(start, i).trim();
-				if (!token.isEmpty()) {
-					final Path p = dir.resolve(token);
-					out.add(p);
-				}
-				start = i + 1;
+	/**
+	 * Reads content from an instruction file and appends it to the result.
+	 *
+	 * @param instructionFile path to the instruction file
+	 * @param result          StringBuilder to append content to
+	 * @throws IOException if reading the file fails
+	 */
+	private void appendInstructionContent(@Nonnull final Path instructionFile, @Nonnull final StringBuilder result) throws IOException {
+		final byte[] bytes = Files.readAllBytes(instructionFile);
+		final String content = new String(bytes, StandardCharsets.UTF_8).trim();
+		if (!content.isEmpty()) {
+			if (result.length() > 0) {
+				result.append("\n\n");
 			}
+			result.append(content);
 		}
 	}
 }

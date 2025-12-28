@@ -77,7 +77,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
-			Collections.emptyList()
+			null
 		);
 
 		assertTrue(jobOpt.isPresent());
@@ -109,7 +109,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
-			Collections.emptyList()
+			null
 		);
 
 		assertTrue(jobOpt.isPresent());
@@ -139,7 +139,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
-			Collections.emptyList()
+			null
 		);
 
 		assertTrue(jobOpt.isEmpty());
@@ -161,7 +161,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
-			Collections.emptyList()
+			null
 		);
 
 		assertTrue(jobOpt.isEmpty());
@@ -180,7 +180,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
-			Collections.emptyList()
+			null
 		);
 
 		assertTrue(jobOpt.isEmpty());
@@ -212,7 +212,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
-			Collections.emptyList()
+			null
 		);
 
 		assertTrue(jobOpt.isPresent());
@@ -221,37 +221,32 @@ public class TranslationOrchestratorTest {
 	}
 
 	@Test
-	@DisplayName("shouldLoadAndCombineInstructionFiles")
-	void shouldLoadAndCombineInstructionFiles() throws Exception {
+	@DisplayName("passes instructions to created job")
+	void shouldPassInstructionsToJob() throws Exception {
 		final Path sourceFile = sourceDir.resolve("with-instructions.md");
 		Files.writeString(sourceFile, "# Content");
 		runGit("add", "source/with-instructions.md");
 		runGit("commit", "-m", "Add file");
 
-		// Create instruction files
-		final Path instr1 = tempDir.resolve("instr1.txt");
-		final Path instr2 = tempDir.resolve("instr2.txt");
-		Files.writeString(instr1, "Instruction 1");
-		Files.writeString(instr2, "Instruction 2");
+		final String customInstructions = "Instruction 1\n\nInstruction 2";
 
 		final Optional<TranslationJob> jobOpt = orchestrator.createJob(
 			sourceFile,
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
-			List.of(instr1, instr2)
+			customInstructions
 		);
 
 		assertTrue(jobOpt.isPresent());
 		final String instructions = jobOpt.get().getInstructions();
 		assertNotNull(instructions);
-		assertTrue(instructions.contains("Instruction 1"));
-		assertTrue(instructions.contains("Instruction 2"));
+		assertEquals(customInstructions, instructions);
 	}
 
 	@Test
-	@DisplayName("shouldHandleEmptyInstructionFiles")
-	void shouldHandleEmptyInstructionFiles() throws Exception {
+	@DisplayName("handles null instructions")
+	void shouldHandleNullInstructions() throws Exception {
 		final Path sourceFile = sourceDir.resolve("no-instructions.md");
 		Files.writeString(sourceFile, "# Content");
 		runGit("add", "source/no-instructions.md");
@@ -262,7 +257,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
-			Collections.emptyList()
+			null
 		);
 
 		assertTrue(jobOpt.isPresent());
@@ -284,7 +279,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
-			Collections.emptyList()
+			null
 		);
 
 		assertTrue(jobOpt.isPresent());
@@ -308,7 +303,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
-			Collections.emptyList()
+			null
 		);
 
 		assertTrue(jobOpt.isPresent());
@@ -329,7 +324,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
-			Collections.emptyList()
+			null
 		);
 
 		assertTrue(jobOpt.isPresent());
@@ -358,7 +353,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
-			Collections.emptyList()
+			null
 		);
 
 		assertTrue(jobOpt.isPresent());

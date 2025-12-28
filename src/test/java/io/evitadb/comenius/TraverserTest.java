@@ -4,6 +4,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -13,11 +14,12 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 @DisplayName("Traverser should visit files matching regex in deterministic order and pass full contents")
 public class TraverserTest {
 	@Test
-	@DisplayName("shouldVisitFilesInOrderWhenPatternMatches")
+	@DisplayName("visits files in lexicographical order")
 	public void shouldVisitFilesInOrderWhenPatternMatches() throws Exception {
 		final Path root = Files.createTempDirectory("traverser-test-");
 		try {
@@ -35,14 +37,14 @@ public class TraverserTest {
 
 			final List<Path> visited = new ArrayList<>();
 			final List<String> contents = new ArrayList<>();
-			final List<List<Path>> instructionFiles = new ArrayList<>();
+			final List<String> instructionsList = new ArrayList<>();
 
 			final Visitor visitor = new Visitor() {
 				@Override
-				public void visit(@Nonnull final Path file, @Nonnull final String content, @Nonnull final java.util.Collection<Path> instructionFilesForFile) {
+				public void visit(@Nonnull final Path file, @Nonnull final String content, @Nullable final String instructions) {
 					visited.add(file);
 					contents.add(content);
-					instructionFiles.add(List.copyOf(instructionFilesForFile));
+					instructionsList.add(instructions);
 				}
 			};
 
@@ -54,7 +56,10 @@ public class TraverserTest {
 			final List<Path> expected = List.of(f1, f3, f4);
 			assertEquals(expected, visited, "Visited files order");
 			assertEquals(List.of("ONE\nLINE\n", "THREE", "Z-FOUR"), contents, "File contents");
-			assertEquals(List.of(List.of(), List.of(), List.of()), instructionFiles, "Instruction files should be empty");
+			// No instruction files, so all should be null
+			for (final String instr : instructionsList) {
+				assertNull(instr, "Instructions should be null when no .comenius-instructions files exist");
+			}
 		} finally {
 			// Cleanup
 			deleteRecursively(root);
@@ -83,36 +88,33 @@ public class TraverserTest {
 	}
 
 	@Test
-	@DisplayName("shouldAccumulateInstructionsFromParentDirectories")
+	@DisplayName("accumulates instructions from parent directories")
 	public void shouldAccumulateInstructionsFromParentDirectories() throws Exception {
 		final Path root = Files.createTempDirectory("traverser-instr-accum-");
 		try {
 			// Structure:
-			// root/.comenius-instructions => ROOT.txt
-			// root/a/.comenius-instructions => A.txt
-			// root/a/b/.comenius-instructions => B.txt
+			// root/.comenius-instructions (contains "ROOT-CONTENT")
+			// root/a/.comenius-instructions (contains "A-CONTENT")
+			// root/a/b/.comenius-instructions (contains "B-CONTENT")
 			// root/a/x.md, root/a/b/y.md
-			final Path rootInstr = write(root.resolve("ROOT.txt"), "ROOT-CONTENT");
-			Files.write(root.resolve(".comenius-instructions"), "ROOT.txt".getBytes(StandardCharsets.UTF_8));
+			Files.write(root.resolve(".comenius-instructions"), "ROOT-CONTENT".getBytes(StandardCharsets.UTF_8));
 			final Path dirA = Files.createDirectories(root.resolve("a"));
-			final Path aInstr = write(dirA.resolve("A.txt"), "A-CONTENT");
-			Files.write(dirA.resolve(".comenius-instructions"), "A.txt".getBytes(StandardCharsets.UTF_8));
+			Files.write(dirA.resolve(".comenius-instructions"), "A-CONTENT".getBytes(StandardCharsets.UTF_8));
 			final Path dirB = Files.createDirectories(dirA.resolve("b"));
-			final Path bInstr = write(dirB.resolve("B.txt"), "B-CONTENT");
-			Files.write(dirB.resolve(".comenius-instructions"), "B.txt".getBytes(StandardCharsets.UTF_8));
+			Files.write(dirB.resolve(".comenius-instructions"), "B-CONTENT".getBytes(StandardCharsets.UTF_8));
 			final Path fx = write(dirA.resolve("x.md"), "X");
 			final Path fy = write(dirB.resolve("y.md"), "Y");
 
 			final List<Path> visited = new ArrayList<>();
 			final List<String> contents = new ArrayList<>();
-			final List<List<Path>> instructionFiles = new ArrayList<>();
+			final List<String> instructionsList = new ArrayList<>();
 
 			final Visitor visitor = new Visitor() {
 				@Override
-				public void visit(@Nonnull final Path file, @Nonnull final String content, @Nonnull final java.util.Collection<Path> instructionFilesForFile) {
+				public void visit(@Nonnull final Path file, @Nonnull final String content, @Nullable final String instructions) {
 					visited.add(file);
 					contents.add(content);
-					instructionFiles.add(List.copyOf(instructionFilesForFile));
+					instructionsList.add(instructions);
 				}
 			};
 
@@ -124,46 +126,45 @@ public class TraverserTest {
 			final List<Path> expectedVisited = List.of(fy, fx);
 			assertEquals(expectedVisited, visited, "Visited files order with instructions");
 			assertEquals(List.of("Y", "X"), contents, "File contents");
-			assertEquals(List.of(List.of(rootInstr, aInstr, bInstr), List.of(rootInstr, aInstr)), instructionFiles, "Accumulated instruction files");
+			// y.md is in b/, so it gets ROOT + A + B accumulated
+			// x.md is in a/, so it gets ROOT + A accumulated
+			assertEquals("ROOT-CONTENT\n\nA-CONTENT\n\nB-CONTENT", instructionsList.get(0), "Instructions for y.md");
+			assertEquals("ROOT-CONTENT\n\nA-CONTENT", instructionsList.get(1), "Instructions for x.md");
 		} finally {
 			deleteRecursively(root);
 		}
 	}
 
 	@Test
-	@DisplayName("shouldResetInstructionsWhenReplaceFileEncountered")
+	@DisplayName("resets instructions when .comenius-instructions.replace is encountered")
 	public void shouldResetInstructionsWhenReplaceFileEncountered() throws Exception {
 		final Path root = Files.createTempDirectory("traverser-instr-replace-");
 		try {
 			// Structure:
-			// root/.comenius-instructions => ROOT.txt
-			// root/a/.comenius-instructions.replace => REPL.txt
-			// root/a/.comenius-instructions => A.txt
-			// root/a/b/.comenius-instructions => B.txt
+			// root/.comenius-instructions (contains "ROOT-CONTENT")
+			// root/a/.comenius-instructions.replace (contains "REPL-CONTENT")
+			// root/a/.comenius-instructions (contains "A-CONTENT")
+			// root/a/b/.comenius-instructions (contains "B-CONTENT")
 			// root/a/x.md, root/a/b/y.md
-			final Path rootInstr = write(root.resolve("ROOT.txt"), "ROOT-CONTENT");
-			Files.write(root.resolve(".comenius-instructions"), "ROOT.txt".getBytes(StandardCharsets.UTF_8));
+			Files.write(root.resolve(".comenius-instructions"), "ROOT-CONTENT".getBytes(StandardCharsets.UTF_8));
 			final Path dirA = Files.createDirectories(root.resolve("a"));
-			final Path replInstr = write(dirA.resolve("REPL.txt"), "REPL-CONTENT");
-			Files.write(dirA.resolve(".comenius-instructions.replace"), "REPL.txt".getBytes(StandardCharsets.UTF_8));
-			final Path aInstr = write(dirA.resolve("A.txt"), "A-CONTENT");
-			Files.write(dirA.resolve(".comenius-instructions"), "A.txt".getBytes(StandardCharsets.UTF_8));
+			Files.write(dirA.resolve(".comenius-instructions.replace"), "REPL-CONTENT".getBytes(StandardCharsets.UTF_8));
+			Files.write(dirA.resolve(".comenius-instructions"), "A-CONTENT".getBytes(StandardCharsets.UTF_8));
 			final Path dirB = Files.createDirectories(dirA.resolve("b"));
-			final Path bInstr = write(dirB.resolve("B.txt"), "B-CONTENT");
-			Files.write(dirB.resolve(".comenius-instructions"), "B.txt".getBytes(StandardCharsets.UTF_8));
+			Files.write(dirB.resolve(".comenius-instructions"), "B-CONTENT".getBytes(StandardCharsets.UTF_8));
 			final Path fx = write(dirA.resolve("x.md"), "X");
 			final Path fy = write(dirB.resolve("y.md"), "Y");
 
 			final List<Path> visited = new ArrayList<>();
 			final List<String> contents = new ArrayList<>();
-			final List<List<Path>> instructionFiles = new ArrayList<>();
+			final List<String> instructionsList = new ArrayList<>();
 
 			final Visitor visitor = new Visitor() {
 				@Override
-				public void visit(@Nonnull final Path file, @Nonnull final String content, @Nonnull final java.util.Collection<Path> instructionFilesForFile) {
+				public void visit(@Nonnull final Path file, @Nonnull final String content, @Nullable final String instructions) {
 					visited.add(file);
 					contents.add(content);
-					instructionFiles.add(List.copyOf(instructionFilesForFile));
+					instructionsList.add(instructions);
 				}
 			};
 
@@ -174,7 +175,10 @@ public class TraverserTest {
 			final List<Path> expectedVisited = List.of(fy, fx);
 			assertEquals(expectedVisited, visited, "Visited files order with replace");
 			assertEquals(List.of("Y", "X"), contents, "File contents");
-			assertEquals(List.of(List.of(replInstr, aInstr, bInstr), List.of(replInstr, aInstr)), instructionFiles, "Reset and accumulate after replace");
+			// y.md is in b/, replace resets at a/, so it gets REPL + A + B (no ROOT)
+			// x.md is in a/, replace resets at a/, so it gets REPL + A (no ROOT)
+			assertEquals("REPL-CONTENT\n\nA-CONTENT\n\nB-CONTENT", instructionsList.get(0), "Instructions for y.md after replace");
+			assertEquals("REPL-CONTENT\n\nA-CONTENT", instructionsList.get(1), "Instructions for x.md after replace");
 		} finally {
 			deleteRecursively(root);
 		}

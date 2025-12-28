@@ -24,13 +24,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 /**
  * Main Mojo for Comenius plugin providing actions:
@@ -213,14 +211,14 @@ public class ComeniusMojo extends AbstractMojo {
 				final AtomicInteger errorCount = new AtomicInteger(0);
 				final AtomicInteger processedCount = new AtomicInteger(0);
 
-				final Visitor collectingVisitor = (file, content, instructionFiles) -> {
+				final Visitor collectingVisitor = (file, content, instructions) -> {
 					if (processedCount.get() >= this.limit) {
 						return; // Respect limit
 					}
 
 					try {
 						final Optional<TranslationJob> jobOpt = orchestrator.createJob(
-							file, content, targetDir, locale, instructionFiles
+							file, content, targetDir, locale, instructions
 						);
 
 						final Path relativePath = root.relativize(file.toAbsolutePath().normalize());
@@ -320,7 +318,7 @@ public class ComeniusMojo extends AbstractMojo {
 			final ContentChecker checker = new ContentChecker(gitService, root, gitRoot);
 			final AtomicInteger fileCount = new AtomicInteger(0);
 
-			final Visitor checkingVisitor = (file, content, instructionFiles) -> {
+			final Visitor checkingVisitor = (file, content, instructions) -> {
 				checker.checkFile(file, content);
 				fileCount.incrementAndGet();
 			};
@@ -380,19 +378,6 @@ public class ComeniusMojo extends AbstractMojo {
 			current = current.getParent();
 		}
 		throw new IOException("Not inside a git repository: " + startDir);
-	}
-
-	@Nonnull
-	private static String toNames(@Nonnull final Collection<Path> paths) {
-		if (paths.isEmpty()) {
-			return "";
-		}
-		final List<String> names = new ArrayList<>(paths.size());
-		for (final Path p : paths) {
-			final Path fn = p.getFileName();
-			names.add(fn == null ? p.toString() : fn.toString());
-		}
-		return names.stream().collect(Collectors.joining(","));
 	}
 
 	// Setters to aid testing without Maven parameter injection
