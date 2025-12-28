@@ -1,6 +1,10 @@
 package io.evitadb.comenius;
 
 import dev.langchain4j.model.chat.ChatModel;
+import io.evitadb.comenius.check.CheckResult;
+import io.evitadb.comenius.check.ContentChecker;
+import io.evitadb.comenius.check.GitError;
+import io.evitadb.comenius.check.LinkError;
 import io.evitadb.comenius.git.GitService;
 import io.evitadb.comenius.llm.ChatModelFactory;
 import io.evitadb.comenius.llm.PromptLoader;
@@ -92,8 +96,11 @@ public class ComeniusMojo extends AbstractMojo {
 			case "translate":
 				translate(getLog());
 				break;
+			case "check":
+				check(getLog());
+				break;
 			default:
-				throw new MojoExecutionException("Unknown action: " + this.action + ". Supported actions: show-config, translate");
+				throw new MojoExecutionException("Unknown action: " + this.action + ". Supported actions: show-config, translate, check");
 		}
 	}
 
@@ -278,6 +285,81 @@ public class ComeniusMojo extends AbstractMojo {
 
 		} catch (final Exception ex) {
 			log.error("Failed to execute translate action: " + ex.getMessage(), ex);
+		}
+	}
+
+	/**
+	 * Executes the check action to validate files before translation.
+	 * Checks that all matched files are committed to Git and have valid links.
+	 *
+	 * @param log the Maven log
+	 * @throws MojoExecutionException if validation fails with errors
+	 */
+	private void check(@Nonnull final Log log) throws MojoExecutionException {
+		// Validate required parameters
+		if (this.sourceDir == null || this.sourceDir.isBlank()) {
+			log.error("Source directory must be specified for check action");
+			throw new MojoExecutionException("Source directory not specified");
+		}
+
+		try {
+			final Path root = Path.of(this.sourceDir).toAbsolutePath().normalize();
+			if (!Files.exists(root) || !Files.isDirectory(root)) {
+				log.error("Source directory does not exist or is not a directory: " + root);
+				throw new MojoExecutionException("Invalid source directory: " + root);
+			}
+			final Pattern pattern = Pattern.compile(this.fileRegex);
+
+			// Find git repository root
+			final Path gitRoot = findGitRoot(root);
+			final GitService gitService = new GitService(gitRoot);
+
+			log.info("=== Checking files in: " + root + " ===");
+			log.info("Git repository root: " + gitRoot);
+
+			final ContentChecker checker = new ContentChecker(gitService, root, gitRoot);
+			final AtomicInteger fileCount = new AtomicInteger(0);
+
+			final Visitor checkingVisitor = (file, content, instructionFiles) -> {
+				checker.checkFile(file, content);
+				fileCount.incrementAndGet();
+			};
+
+			final Traverser traverser = new Traverser(root, pattern, checkingVisitor);
+			traverser.traverse();
+
+			final CheckResult result = checker.getResult();
+
+			// Report results
+			log.info("Checked " + fileCount.get() + " files");
+
+			if (!result.gitErrors().isEmpty()) {
+				log.error("Git status errors: " + result.gitErrors().size());
+				for (final GitError error : result.gitErrors()) {
+					final Path relativePath = root.relativize(error.file());
+					log.error("  " + error.type() + ": " + relativePath);
+				}
+			}
+
+			if (!result.linkErrors().isEmpty()) {
+				log.error("Link validation errors: " + result.linkErrors().size());
+				for (final LinkError error : result.linkErrors()) {
+					final Path relativePath = root.relativize(error.sourceFile());
+					log.error("  " + relativePath + ": " + error.linkDestination() +
+						" (" + error.type() + ")");
+				}
+			}
+
+			if (!result.isSuccess()) {
+				throw new MojoExecutionException(
+					"Check failed with " + result.errorCount() + " error(s)"
+				);
+			}
+
+			log.info("All checks passed!");
+
+		} catch (final IOException ex) {
+			throw new MojoExecutionException("Check action failed: " + ex.getMessage(), ex);
 		}
 	}
 
