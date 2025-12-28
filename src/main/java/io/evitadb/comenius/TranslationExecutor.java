@@ -11,8 +11,10 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -30,6 +32,12 @@ public final class TranslationExecutor {
 	private final Writer writer;
 	private final Log log;
 	private final Path sourceDir;
+	/**
+	 * Tracks successfully translated files for post-processing (e.g., link correction).
+	 * Key is the target file path, value is the translated content before writing.
+	 */
+	@Nonnull
+	private final Map<Path, String> successfullyTranslatedFiles = new ConcurrentHashMap<>();
 
 	/**
 	 * Creates a translation executor with the specified parallelism.
@@ -125,6 +133,11 @@ public final class TranslationExecutor {
 		if (result.success()) {
 			try {
 				writeTranslation(result);
+				// Track for post-processing (link correction)
+				this.successfullyTranslatedFiles.put(
+					job.getTargetFile(),
+					result.translatedContent()
+				);
 				this.log.info("[" + job.getType() + "] Translated: " + relativePath + " -> " + job.getTargetFile());
 				return summary.withSuccess(result.inputTokens(), result.outputTokens());
 			} catch (IOException e) {
@@ -167,5 +180,17 @@ public final class TranslationExecutor {
 			Thread.currentThread().interrupt();
 			this.executor.shutdownNow();
 		}
+	}
+
+	/**
+	 * Returns a copy of the successfully translated files map.
+	 * Key is the target file path, value is the translated content before writing.
+	 * This is useful for post-processing steps like link correction.
+	 *
+	 * @return immutable copy of successfully translated files
+	 */
+	@Nonnull
+	public Map<Path, String> getSuccessfullyTranslatedFiles() {
+		return Map.copyOf(this.successfullyTranslatedFiles);
 	}
 }

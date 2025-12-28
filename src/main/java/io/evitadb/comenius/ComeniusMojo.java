@@ -4,10 +4,13 @@ import dev.langchain4j.model.chat.ChatModel;
 import io.evitadb.comenius.check.CheckResult;
 import io.evitadb.comenius.check.ContentChecker;
 import io.evitadb.comenius.check.GitError;
+import io.evitadb.comenius.check.LinkCorrector;
+import io.evitadb.comenius.check.LinkCorrectionResult;
 import io.evitadb.comenius.check.LinkError;
 import io.evitadb.comenius.git.GitService;
 import io.evitadb.comenius.llm.ChatModelFactory;
 import io.evitadb.comenius.llm.PromptLoader;
+import io.evitadb.comenius.model.MarkdownDocument;
 import io.evitadb.comenius.model.TranslateIncrementalJob;
 import io.evitadb.comenius.model.TranslationJob;
 import io.evitadb.comenius.model.TranslationSummary;
@@ -21,11 +24,14 @@ import org.apache.maven.plugins.annotations.Parameter;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
@@ -303,6 +309,16 @@ public class ComeniusMojo extends AbstractMojo {
 					log.info("Skipped: " + skippedCount.get());
 					log.info("Input tokens: " + summary.inputTokens());
 					log.info("Output tokens: " + summary.outputTokens());
+
+					// Link correction phase
+					if (summary.successCount() > 0) {
+						log.info("--- Link Correction Phase ---");
+						final Map<Path, String> translatedFiles = executor.getSuccessfullyTranslatedFiles();
+						correctLinksInTranslatedFiles(
+							log, root, targetDir, pattern, exclusionPatterns,
+							translatedFiles, gitService, gitRoot
+						);
+					}
 				}
 			}
 
@@ -409,6 +425,112 @@ public class ComeniusMojo extends AbstractMojo {
 			current = current.getParent();
 		}
 		throw new IOException("Not inside a git repository: " + startDir);
+	}
+
+	/**
+	 * Corrects links in translated files and validates the results.
+	 *
+	 * This method performs post-translation link correction:
+	 * 1. Asset links are recalculated to point from target directory to source assets
+	 * 2. Anchor links are translated by mapping heading indices between source and translated docs
+	 * 3. Corrected files are written back to disk
+	 * 4. ContentChecker validates all links are correct after correction
+	 *
+	 * @param log               Maven log for output
+	 * @param sourceDir         source directory containing original files
+	 * @param targetDir         target directory containing translated files
+	 * @param filePattern       pattern to match translatable markdown files
+	 * @param exclusionPatterns patterns for files to exclude
+	 * @param translatedFiles   map of translated file paths to their content
+	 * @param gitService        git service for validation
+	 * @param gitRoot           git repository root
+	 */
+	private void correctLinksInTranslatedFiles(
+		@Nonnull Log log,
+		@Nonnull Path sourceDir,
+		@Nonnull Path targetDir,
+		@Nonnull Pattern filePattern,
+		@Nullable List<Pattern> exclusionPatterns,
+		@Nonnull Map<Path, String> translatedFiles,
+		@Nonnull GitService gitService,
+		@Nonnull Path gitRoot
+	) {
+		final LinkCorrector corrector = new LinkCorrector(
+			sourceDir, targetDir, filePattern, exclusionPatterns, log
+		);
+
+		// Read actual content from disk (includes commit field added during translation)
+		final Map<Path, String> filesWithContent = new HashMap<>();
+		for (final Path path : translatedFiles.keySet()) {
+			try {
+				final String content = Files.readString(path, StandardCharsets.UTF_8);
+				filesWithContent.put(path, content);
+			} catch (IOException e) {
+				log.error("Failed to read translated file for link correction: " + path);
+			}
+		}
+
+		final List<LinkCorrectionResult> results = corrector.correctAll(filesWithContent);
+
+		// Write corrected files and collect statistics
+		final Writer writer = new Writer();
+		int totalCorrections = 0;
+		int filesWithCorrections = 0;
+		int correctionErrors = 0;
+
+		for (final LinkCorrectionResult result : results) {
+			if (!result.isSuccess()) {
+				correctionErrors++;
+				for (final String error : result.errors()) {
+					log.error("Link correction error in " + result.targetFile() + ": " + error);
+				}
+				continue;
+			}
+
+			if (result.totalCorrections() > 0) {
+				try {
+					final MarkdownDocument doc = new MarkdownDocument(result.correctedContent());
+					writer.write(doc, result.targetFile());
+					filesWithCorrections++;
+					totalCorrections += result.totalCorrections();
+					log.debug("Corrected " + result.totalCorrections() + " links in " +
+						result.targetFile().getFileName());
+				} catch (IOException e) {
+					log.error("Failed to write corrected file " + result.targetFile() + ": " + e.getMessage());
+					correctionErrors++;
+				}
+			}
+		}
+
+		log.info("Link corrections: " + totalCorrections + " in " + filesWithCorrections + " files");
+		if (correctionErrors > 0) {
+			log.error("Link correction errors: " + correctionErrors);
+		}
+
+		// Validation phase
+		log.info("--- Link Validation Phase ---");
+		final ContentChecker checker = new ContentChecker(gitService, targetDir, gitRoot);
+		int validatedCount = 0;
+
+		for (final LinkCorrectionResult result : results) {
+			if (result.isSuccess()) {
+				checker.checkFile(result.targetFile(), result.correctedContent());
+				validatedCount++;
+			}
+		}
+
+		final CheckResult checkResult = checker.getResult();
+
+		if (!checkResult.linkErrors().isEmpty()) {
+			log.error("Post-correction link validation errors: " + checkResult.linkErrors().size());
+			for (final LinkError error : checkResult.linkErrors()) {
+				final Path relativePath = targetDir.relativize(error.sourceFile());
+				log.error("  " + relativePath + ": " + error.linkDestination() +
+					" (" + error.type() + ")");
+			}
+		} else {
+			log.info("Validated " + validatedCount + " files - all links OK");
+		}
 	}
 
 	// Setters to aid testing without Maven parameter injection
