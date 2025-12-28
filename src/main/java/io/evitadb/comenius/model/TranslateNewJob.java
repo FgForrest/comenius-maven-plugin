@@ -1,0 +1,61 @@
+package io.evitadb.comenius.model;
+
+import io.evitadb.comenius.llm.PromptLoader;
+
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+
+/**
+ * Translation job for new files that have no existing translation.
+ * Uses full translation prompts to translate the entire document.
+ */
+public final class TranslateNewJob extends TranslationJob {
+
+	private static final String SYSTEM_TEMPLATE = "translate-new-system.txt";
+	private static final String USER_TEMPLATE = "translate-new-user.txt";
+
+	/**
+	 * Creates a new translation job for a file without existing translation.
+	 *
+	 * @param sourceFile    the source markdown file path
+	 * @param targetFile    the target file path for the translation
+	 * @param locale        the target locale for translation
+	 * @param sourceContent the current content of the source file
+	 * @param currentCommit the current commit hash of the source file
+	 * @param instructions  optional custom instructions from .comenius-instructions files
+	 */
+	public TranslateNewJob(
+		@Nonnull Path sourceFile,
+		@Nonnull Path targetFile,
+		@Nonnull Locale locale,
+		@Nonnull String sourceContent,
+		@Nonnull String currentCommit,
+		@Nullable String instructions
+	) {
+		super(sourceFile, targetFile, locale, sourceContent, currentCommit, instructions);
+	}
+
+	@Override
+	@Nonnull
+	public String buildSystemPrompt(@Nonnull PromptLoader loader) {
+		return loader.loadAndInterpolate(SYSTEM_TEMPLATE, getCommonPlaceholders());
+	}
+
+	@Override
+	@Nonnull
+	public String buildUserPrompt(@Nonnull PromptLoader loader) {
+		final Map<String, String> placeholders = new HashMap<>(getCommonPlaceholders());
+		placeholders.put("sourceContent", this.sourceContent);
+		return loader.loadAndInterpolate(USER_TEMPLATE, placeholders);
+	}
+
+	@Override
+	@Nonnull
+	public String getType() {
+		return "NEW";
+	}
+}

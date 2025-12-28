@@ -1,0 +1,5 @@
+Translate the following content:
+
+{{sourceContent}}
+
+{{customInstructions}}

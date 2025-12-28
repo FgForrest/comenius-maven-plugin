@@ -1,0 +1,13 @@
+{{customInstructions}}
+
+=== ORIGINAL SOURCE DOCUMENT ===
+{{originalSource}}
+
+=== EXISTING TRANSLATION ===
+{{existingTranslation}}
+
+=== CHANGES (UNIFIED DIFF) ===
+{{diff}}
+
+=== YOUR TASK ===
+Apply the equivalent changes shown in the diff to the existing translation. Output the complete updated translation.
