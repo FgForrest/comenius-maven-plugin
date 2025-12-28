@@ -82,6 +82,10 @@ public class ComeniusMojo extends AbstractMojo {
 	@Parameter(property = "comenius.parallelism", defaultValue = "4")
 	private int parallelism = 4;
 
+	/** Regex patterns to exclude directories/files from processing. */
+	@Parameter(property = "comenius.excludedFilePatterns")
+	private List<String> excludedFilePatterns;
+
 	@Override
 	public void execute() throws MojoExecutionException {
 		if (this.action == null || this.action.isBlank()) {
@@ -140,6 +144,14 @@ public class ComeniusMojo extends AbstractMojo {
 		log.info(" - limit: " + this.limit);
 		log.info(" - dryRun: " + this.dryRun);
 		log.info(" - parallelism: " + this.parallelism);
+		if (this.excludedFilePatterns == null || this.excludedFilePatterns.isEmpty()) {
+			log.info(" - excludedFilePatterns: <none>");
+		} else {
+			log.info(" - excludedFilePatterns:");
+			for (final String pattern : this.excludedFilePatterns) {
+				log.info("   - " + pattern);
+			}
+		}
 	}
 
 	@Nonnull
@@ -148,6 +160,23 @@ public class ComeniusMojo extends AbstractMojo {
 			return "****";
 		}
 		return "****" + value.substring(value.length() - 4);
+	}
+
+	/**
+	 * Compiles the exclusion patterns list into Pattern objects.
+	 *
+	 * @param patterns the list of regex patterns to compile
+	 * @return list of compiled patterns, or null if input is null/empty
+	 */
+	@Nullable
+	private static List<Pattern> compileExclusionPatterns(@Nullable final List<String> patterns) {
+		if (patterns == null || patterns.isEmpty()) {
+			return null;
+		}
+		return patterns.stream()
+			.filter(s -> s != null && !s.isBlank())
+			.map(Pattern::compile)
+			.toList();
 	}
 
 	private void translate(@Nonnull final Log log) {
@@ -250,7 +279,8 @@ public class ComeniusMojo extends AbstractMojo {
 					}
 				};
 
-				final Traverser traverser = new Traverser(root, pattern, collectingVisitor);
+				final List<Pattern> exclusionPatterns = compileExclusionPatterns(this.excludedFilePatterns);
+				final Traverser traverser = new Traverser(root, pattern, exclusionPatterns, collectingVisitor);
 				traverser.traverse();
 
 				// Phase 2: Execute or Report summary
@@ -323,7 +353,8 @@ public class ComeniusMojo extends AbstractMojo {
 				fileCount.incrementAndGet();
 			};
 
-			final Traverser traverser = new Traverser(root, pattern, checkingVisitor);
+			final List<Pattern> exclusionPatterns = compileExclusionPatterns(this.excludedFilePatterns);
+			final Traverser traverser = new Traverser(root, pattern, exclusionPatterns, checkingVisitor);
 			traverser.traverse();
 
 			final CheckResult result = checker.getResult();
@@ -392,6 +423,7 @@ public class ComeniusMojo extends AbstractMojo {
 	void setLimit(final int limit) { this.limit = limit; }
 	void setDryRun(final boolean dryRun) { this.dryRun = dryRun; }
 	void setParallelism(final int parallelism) { this.parallelism = parallelism; }
+	void setExcludedFilePatterns(@Nullable final List<String> patterns) { this.excludedFilePatterns = patterns; }
 
 	/** Target language configuration. */
 	public static class Target {

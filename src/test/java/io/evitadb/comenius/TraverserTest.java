@@ -49,7 +49,7 @@ public class TraverserTest {
 			};
 
 			final Pattern pattern = Pattern.compile("(?i).*\\.md");
-			final Traverser traverser = new Traverser(root, pattern, visitor);
+			final Traverser traverser = new Traverser(root, pattern, null, visitor);
 			traverser.traverse();
 
 			// Expect lexicographic path order
@@ -119,7 +119,7 @@ public class TraverserTest {
 			};
 
 			final Pattern pattern = Pattern.compile("(?i).*\\.md");
-			final Traverser traverser = new Traverser(root, pattern, visitor);
+			final Traverser traverser = new Traverser(root, pattern, null, visitor);
 			traverser.traverse();
 
 			// Determine expectations in traversal order (directories before files)
@@ -169,7 +169,7 @@ public class TraverserTest {
 			};
 
 			final Pattern pattern = Pattern.compile("(?i).*\\.md");
-			final Traverser traverser = new Traverser(root, pattern, visitor);
+			final Traverser traverser = new Traverser(root, pattern, null, visitor);
 			traverser.traverse();
 
 			final List<Path> expectedVisited = List.of(fy, fx);
@@ -179,6 +179,137 @@ public class TraverserTest {
 			// x.md is in a/, replace resets at a/, so it gets REPL + A (no ROOT)
 			assertEquals("REPL-CONTENT\n\nA-CONTENT\n\nB-CONTENT", instructionsList.get(0), "Instructions for y.md after replace");
 			assertEquals("REPL-CONTENT\n\nA-CONTENT", instructionsList.get(1), "Instructions for x.md after replace");
+		} finally {
+			deleteRecursively(root);
+		}
+	}
+
+	@Test
+	@DisplayName("skips excluded directories entirely")
+	public void shouldSkipExcludedDirectories() throws Exception {
+		final Path root = Files.createTempDirectory("traverser-exclude-dir-");
+		try {
+			// Structure:
+			// root/docs/readme.md
+			// root/assets/image.md (should be excluded)
+			// root/other.md
+			final Path dirDocs = Files.createDirectories(root.resolve("docs"));
+			final Path dirAssets = Files.createDirectories(root.resolve("assets"));
+			final Path f1 = write(dirDocs.resolve("readme.md"), "README");
+			write(dirAssets.resolve("image.md"), "IMAGE");
+			final Path f3 = write(root.resolve("other.md"), "OTHER");
+
+			final List<Path> visited = new ArrayList<>();
+
+			final Visitor visitor = (file, content, instructions) -> visited.add(file);
+
+			final Pattern pattern = Pattern.compile("(?i).*\\.md");
+			final List<Pattern> exclusions = List.of(Pattern.compile(".*/assets/.*"));
+			final Traverser traverser = new Traverser(root, pattern, exclusions, visitor);
+			traverser.traverse();
+
+			// Only docs/readme.md and other.md should be visited
+			final List<Path> expected = List.of(f1, f3);
+			assertEquals(expected, visited, "Excluded directories should be skipped");
+		} finally {
+			deleteRecursively(root);
+		}
+	}
+
+	@Test
+	@DisplayName("supports multiple exclusion patterns")
+	public void shouldSupportMultipleExclusionPatterns() throws Exception {
+		final Path root = Files.createTempDirectory("traverser-multi-exclude-");
+		try {
+			// Structure:
+			// root/docs/readme.md
+			// root/assets/asset.md (excluded)
+			// root/images/img.md (excluded)
+			// root/other.md
+			final Path dirDocs = Files.createDirectories(root.resolve("docs"));
+			final Path dirAssets = Files.createDirectories(root.resolve("assets"));
+			final Path dirImages = Files.createDirectories(root.resolve("images"));
+			final Path f1 = write(dirDocs.resolve("readme.md"), "README");
+			write(dirAssets.resolve("asset.md"), "ASSET");
+			write(dirImages.resolve("img.md"), "IMG");
+			final Path f4 = write(root.resolve("other.md"), "OTHER");
+
+			final List<Path> visited = new ArrayList<>();
+
+			final Visitor visitor = (file, content, instructions) -> visited.add(file);
+
+			final Pattern pattern = Pattern.compile("(?i).*\\.md");
+			final List<Pattern> exclusions = List.of(
+				Pattern.compile(".*/assets/.*"),
+				Pattern.compile(".*/images/.*")
+			);
+			final Traverser traverser = new Traverser(root, pattern, exclusions, visitor);
+			traverser.traverse();
+
+			// Only docs/readme.md and other.md should be visited
+			final List<Path> expected = List.of(f1, f4);
+			assertEquals(expected, visited, "Multiple exclusion patterns should work");
+		} finally {
+			deleteRecursively(root);
+		}
+	}
+
+	@Test
+	@DisplayName("works with empty exclusion list")
+	public void shouldWorkWithEmptyExclusionList() throws Exception {
+		final Path root = Files.createTempDirectory("traverser-empty-exclude-");
+		try {
+			// Structure:
+			// root/docs/readme.md
+			// root/other.md
+			final Path dirDocs = Files.createDirectories(root.resolve("docs"));
+			final Path f1 = write(dirDocs.resolve("readme.md"), "README");
+			final Path f2 = write(root.resolve("other.md"), "OTHER");
+
+			final List<Path> visited = new ArrayList<>();
+
+			final Visitor visitor = (file, content, instructions) -> visited.add(file);
+
+			final Pattern pattern = Pattern.compile("(?i).*\\.md");
+			// Pass empty list - should work the same as null
+			final Traverser traverser = new Traverser(root, pattern, List.of(), visitor);
+			traverser.traverse();
+
+			// All .md files should be visited
+			final List<Path> expected = List.of(f1, f2);
+			assertEquals(expected, visited, "Empty exclusion list should not affect traversal");
+		} finally {
+			deleteRecursively(root);
+		}
+	}
+
+	@Test
+	@DisplayName("excludes files matching pattern in non-excluded directories")
+	public void shouldExcludeFilesMatchingPatternInNonExcludedDirectories() throws Exception {
+		final Path root = Files.createTempDirectory("traverser-file-exclude-");
+		try {
+			// Structure:
+			// root/docs/readme.md
+			// root/docs/_draft.md (excluded by file pattern)
+			// root/other.md
+			final Path dirDocs = Files.createDirectories(root.resolve("docs"));
+			final Path f1 = write(dirDocs.resolve("readme.md"), "README");
+			write(dirDocs.resolve("_draft.md"), "DRAFT");
+			final Path f3 = write(root.resolve("other.md"), "OTHER");
+
+			final List<Path> visited = new ArrayList<>();
+
+			final Visitor visitor = (file, content, instructions) -> visited.add(file);
+
+			final Pattern pattern = Pattern.compile("(?i).*\\.md");
+			// Exclude files starting with underscore
+			final List<Pattern> exclusions = List.of(Pattern.compile(".*/_.*\\.md"));
+			final Traverser traverser = new Traverser(root, pattern, exclusions, visitor);
+			traverser.traverse();
+
+			// Only readme.md and other.md should be visited
+			final List<Path> expected = List.of(f1, f3);
+			assertEquals(expected, visited, "Files matching exclusion pattern should be skipped");
 		} finally {
 			deleteRecursively(root);
 		}

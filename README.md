@@ -60,19 +60,20 @@ The plugin provides three actions via the `comenius.action` parameter:
 
 ## Configuration Parameters
 
-| Parameter     | Property               | Default       | Description                                    |
-|---------------|------------------------|---------------|------------------------------------------------|
-| `action`      | `comenius.action`      | `show-config` | Action to perform                              |
-| `llmProvider` | `comenius.llmProvider` | `openai`      | LLM provider: `openai` or `anthropic`          |
-| `llmUrl`      | `comenius.llmUrl`      | -             | LLM API endpoint URL                           |
-| `llmToken`    | `comenius.llmToken`    | -             | API authentication token                       |
-| `llmModel`    | `comenius.llmModel`    | `gpt-4o`      | Model name to use                              |
-| `sourceDir`   | `comenius.sourceDir`   | -             | Source directory containing files to translate |
-| `fileRegex`   | `comenius.fileRegex`   | `(?i).*\.md`  | Regex pattern to match files                   |
-| `targets`     | `comenius.targets`     | -             | List of target languages and directories       |
-| `limit`       | `comenius.limit`       | `2147483647`  | Maximum number of files to process             |
-| `dryRun`      | `comenius.dryRun`      | `true`        | When true, simulates without writing           |
-| `parallelism` | `comenius.parallelism` | `4`           | Number of parallel translation threads         |
+| Parameter              | Property                        | Default       | Description                                         |
+|------------------------|---------------------------------|---------------|-----------------------------------------------------|
+| `action`               | `comenius.action`               | `show-config` | Action to perform                                   |
+| `llmProvider`          | `comenius.llmProvider`          | `openai`      | LLM provider: `openai` or `anthropic`               |
+| `llmUrl`               | `comenius.llmUrl`               | -             | LLM API endpoint URL                                |
+| `llmToken`             | `comenius.llmToken`             | -             | API authentication token                            |
+| `llmModel`             | `comenius.llmModel`             | `gpt-4o`      | Model name to use                                   |
+| `sourceDir`            | `comenius.sourceDir`            | -             | Source directory containing files to translate      |
+| `fileRegex`            | `comenius.fileRegex`            | `(?i).*\.md`  | Regex pattern to match files                        |
+| `targets`              | `comenius.targets`              | -             | List of target languages and directories            |
+| `limit`                | `comenius.limit`                | `2147483647`  | Maximum number of files to process                  |
+| `dryRun`               | `comenius.dryRun`               | `true`        | When true, simulates without writing                |
+| `parallelism`          | `comenius.parallelism`          | `4`           | Number of parallel translation threads              |
+| `excludedFilePatterns` | `comenius.excludedFilePatterns` | -             | List of regex patterns to exclude directories/files |
 
 ## Recommended Workflow
 
@@ -278,6 +279,37 @@ Style guidelines:
 - Keep code examples unchanged
 - Preserve all markdown formatting
 ```
+
+## Excluding Directories and Files
+
+Use `excludedFilePatterns` to skip directories or files from processing. This is useful for excluding
+asset directories that contain images or other non-translatable content.
+
+### Configuration
+
+```xml
+
+<excludedFilePatterns>
+    <excludedFilePattern>.*/assets/.*</excludedFilePattern>
+    <excludedFilePattern>.*/images/.*</excludedFilePattern>
+    <excludedFilePattern>(?i).*/node_modules/.*</excludedFilePattern>
+</excludedFilePatterns>
+```
+
+### Pattern Matching
+
+- Patterns are matched against the **full absolute path** of files and directories
+- Use `(?i)` prefix for case-insensitive matching
+- Excluded directories are **skipped entirely** during traversal (efficient for large asset folders)
+
+### Common Exclusion Patterns
+
+| Pattern                  | Excludes                                    |
+|--------------------------|---------------------------------------------|
+| `.*/assets/.*`           | All files in any `assets` directory         |
+| `.*/images/.*`           | All files in any `images` directory         |
+| `.*/_.*\.md`             | Markdown files starting with underscore     |
+| `(?i).*/node_modules/.*` | node_modules directories (case-insensitive) |
 
 ## LLM Provider Configuration
 

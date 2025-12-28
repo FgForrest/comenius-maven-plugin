@@ -38,19 +38,27 @@ public final class Traverser {
 	@Nonnull
 	private final Pattern filePattern;
 	@Nonnull
+	private final List<Pattern> exclusionPatterns;
+	@Nonnull
 	private final Visitor visitor;
 
 	/**
 	 * Create a traverser.
 	 *
-	 * @param sourceDir   root directory to traverse
-	 * @param filePattern regex pattern for matching file paths (Path.toString())
-	 * @param visitor     callback to process file contents
+	 * @param sourceDir         root directory to traverse
+	 * @param filePattern       regex pattern for matching file paths (Path.toString())
+	 * @param exclusionPatterns list of regex patterns for excluding directories/files
+	 * @param visitor           callback to process file contents
 	 */
-	public Traverser(@Nonnull final Path sourceDir, @Nonnull final Pattern filePattern,
-					 @Nonnull final Visitor visitor) {
+	public Traverser(
+		@Nonnull final Path sourceDir,
+		@Nonnull final Pattern filePattern,
+		@Nullable final List<Pattern> exclusionPatterns,
+		@Nonnull final Visitor visitor
+	) {
 		this.sourceDir = sourceDir;
 		this.filePattern = filePattern;
+		this.exclusionPatterns = exclusionPatterns != null ? exclusionPatterns : List.of();
 		this.visitor = visitor;
 	}
 
@@ -79,6 +87,10 @@ public final class Traverser {
 			if (!this.filePattern.matcher(p).matches()) {
 				continue;
 			}
+			// Skip files matching exclusion patterns (for file-level exclusions like .*/_.*\.md)
+			if (isExcluded(p)) {
+				continue;
+			}
 			final byte[] bytes = Files.readAllBytes(file); // single allocation for performance
 			final String content = new String(bytes, StandardCharsets.UTF_8);
 			final Path parent = file.getParent();
@@ -97,12 +109,31 @@ public final class Traverser {
 		for (final Path child : children) {
 			final BasicFileAttributes attrs = Files.readAttributes(child, BasicFileAttributes.class);
 			if (attrs.isDirectory()) {
-				collectFiles(child, out);
+				// Skip excluded directories entirely for efficiency
+				final String dirPath = child.toString();
+				if (!isExcluded(dirPath) && !isExcluded(dirPath + "/")) {
+					collectFiles(child, out);
+				}
 			} else if (attrs.isRegularFile()) {
 				out.add(child);
 			}
 			// symlinks and other types are ignored deliberately
 		}
+	}
+
+	/**
+	 * Checks if the given path matches any exclusion pattern.
+	 *
+	 * @param path the path to check
+	 * @return true if the path should be excluded
+	 */
+	private boolean isExcluded(@Nonnull final String path) {
+		for (final Pattern pattern : this.exclusionPatterns) {
+			if (pattern.matcher(path).matches()) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
