@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
@@ -52,11 +53,12 @@ public final class TranslationOrchestrator {
 	 * Creates a translation job for a file, or returns empty if the file should be skipped.
 	 * Validates git state and determines whether this is a new or incremental translation.
 	 *
-	 * @param sourceFile    the source markdown file
-	 * @param sourceContent the content of the source file
-	 * @param targetDir     the target directory for translations
-	 * @param locale        the target locale
-	 * @param instructions  accumulated instructions from `.comenius-instructions` files (may be null)
+	 * @param sourceFile                    the source markdown file
+	 * @param sourceContent                 the content of the source file
+	 * @param targetDir                     the target directory for translations
+	 * @param locale                        the target locale
+	 * @param instructions                  accumulated instructions from `.comenius-instructions` files (may be null)
+	 * @param translatableFrontMatterFields optional list of front matter field names to translate
 	 * @return Optional containing the job, or empty if file should be skipped
 	 * @throws IOException if an I/O error occurs
 	 */
@@ -66,7 +68,8 @@ public final class TranslationOrchestrator {
 		@Nonnull String sourceContent,
 		@Nonnull Path targetDir,
 		@Nonnull Locale locale,
-		@Nullable String instructions
+		@Nullable String instructions,
+		@Nullable List<String> translatableFrontMatterFields
 	) throws IOException {
 		Objects.requireNonNull(sourceFile, "sourceFile must not be null");
 		Objects.requireNonNull(sourceContent, "sourceContent must not be null");
@@ -116,7 +119,8 @@ public final class TranslationOrchestrator {
 		// Create appropriate job type based on CommitInfo state
 		if (commitInfo.isNewFile() || existingTranslation == null) {
 			return Optional.of(new TranslateNewJob(
-				sourceFile, targetFile, locale, sourceContent, commitInfo.currentCommit(), instructions
+				sourceFile, targetFile, locale, sourceContent, commitInfo.currentCommit(), instructions,
+				translatableFrontMatterFields
 			));
 		}
 
@@ -125,12 +129,14 @@ public final class TranslationOrchestrator {
 			this.log.warn("[WARN] Cannot retrieve source at commit " + commitInfo.translatedCommit() +
 				" for " + relativePath + ". Treating as new file.");
 			return Optional.of(new TranslateNewJob(
-				sourceFile, targetFile, locale, sourceContent, commitInfo.currentCommit(), instructions
+				sourceFile, targetFile, locale, sourceContent, commitInfo.currentCommit(), instructions,
+				translatableFrontMatterFields
 			));
 		}
 
 		return Optional.of(new TranslateIncrementalJob(
 			sourceFile, targetFile, locale, sourceContent, commitInfo.currentCommit(), instructions,
+			translatableFrontMatterFields,
 			commitInfo.originalSource(),
 			existingTranslation,
 			commitInfo.diff() != null ? commitInfo.diff() : "",

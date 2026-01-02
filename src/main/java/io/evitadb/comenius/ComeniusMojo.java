@@ -81,8 +81,8 @@ public class ComeniusMojo extends AbstractMojo {
 	private int limit = Integer.MAX_VALUE;
 
 	/** When true, do not write any changes, only simulate. */
-	@Parameter(property = "comenius.dryRun", defaultValue = "true")
-	private boolean dryRun = true;
+	@Parameter(property = "comenius.dryRun", defaultValue = "false")
+	private boolean dryRun = false;
 
 	/** Number of parallel translation threads (default 4). */
 	@Parameter(property = "comenius.parallelism", defaultValue = "4")
@@ -91,6 +91,10 @@ public class ComeniusMojo extends AbstractMojo {
 	/** Regex patterns to exclude directories/files from processing. */
 	@Parameter(property = "comenius.excludedFilePatterns")
 	private List<String> excludedFilePatterns;
+
+	/** YAML front matter field names to translate (e.g., "title", "perex"). */
+	@Parameter(property = "comenius.translatableFrontMatterFields")
+	private List<String> translatableFrontMatterFields;
 
 	@Override
 	public void execute() throws MojoExecutionException {
@@ -156,6 +160,14 @@ public class ComeniusMojo extends AbstractMojo {
 			log.info(" - excludedFilePatterns:");
 			for (final String pattern : this.excludedFilePatterns) {
 				log.info("   - " + pattern);
+			}
+		}
+		if (this.translatableFrontMatterFields == null || this.translatableFrontMatterFields.isEmpty()) {
+			log.info(" - translatableFrontMatterFields: <none>");
+		} else {
+			log.info(" - translatableFrontMatterFields:");
+			for (final String field : this.translatableFrontMatterFields) {
+				log.info("   - " + field);
 			}
 		}
 	}
@@ -253,7 +265,7 @@ public class ComeniusMojo extends AbstractMojo {
 
 					try {
 						final Optional<TranslationJob> jobOpt = orchestrator.createJob(
-							file, content, targetDir, locale, instructions
+							file, content, targetDir, locale, instructions, this.translatableFrontMatterFields
 						);
 
 						final Path relativePath = root.relativize(file.toAbsolutePath().normalize());
@@ -546,6 +558,7 @@ public class ComeniusMojo extends AbstractMojo {
 	void setDryRun(final boolean dryRun) { this.dryRun = dryRun; }
 	void setParallelism(final int parallelism) { this.parallelism = parallelism; }
 	void setExcludedFilePatterns(@Nullable final List<String> patterns) { this.excludedFilePatterns = patterns; }
+	void setTranslatableFrontMatterFields(@Nullable final List<String> fields) { this.translatableFrontMatterFields = fields; }
 
 	/** Target language configuration. */
 	public static class Target {

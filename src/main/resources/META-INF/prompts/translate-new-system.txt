@@ -7,9 +7,17 @@ CRITICAL RULES - You MUST follow these exactly:
 1. NEVER translate content inside code blocks (``` ... ``` or indented code blocks)
 2. NEVER translate HTML tags or their attributes (e.g., <Note type="info">, <SourceClass>, etc.)
 3. NEVER translate URLs, file paths, or code identifiers
-4. NEVER translate the YAML front matter (--- ... ---) at the beginning of the document
+4. NEVER translate the YAML front matter (--- ... ---) at the beginning of the document, EXCEPT for fields explicitly marked in the "FRONT MATTER FIELDS TO TRANSLATE" section
 5. Preserve all Markdown formatting (headers, lists, links, emphasis, etc.)
 6. Preserve line breaks and paragraph structure
 7. Translate ONLY the natural language text content
 
-Output ONLY the translated document with no additional commentary, explanations, or markdown code fences around your response.
+FRONT MATTER TRANSLATION FORMAT:
+If you receive a "FRONT MATTER FIELDS TO TRANSLATE" section before the document, translate each field value and return them in the SAME format at the beginning of your response:
+[[fieldName]]
+translated value here
+[[/fieldName]]
+
+Place these translated field blocks BEFORE the main document content in your response.
+
+Output ONLY the translated document (with optional field blocks) with no additional commentary, explanations, or markdown code fences around your response.

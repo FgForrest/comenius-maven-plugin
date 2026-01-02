@@ -46,6 +46,7 @@ public class TranslatorTest {
 			Locale.GERMAN,
 			"# Hello World",
 			"abc123",
+			null,
 			null
 		);
 
@@ -69,6 +70,7 @@ public class TranslatorTest {
 			Locale.GERMAN,
 			"# Updated Content",
 			"def456",
+			null,
 			null,
 			"# Original Content",
 			"# Urspruenglicher Inhalt",
@@ -95,6 +97,7 @@ public class TranslatorTest {
 			Locale.GERMAN,
 			"# Content",
 			"abc123",
+			null,
 			null
 		);
 
@@ -119,6 +122,7 @@ public class TranslatorTest {
 			Locale.GERMAN,
 			"content",
 			"abc123",
+			null,
 			null
 		);
 
@@ -138,6 +142,7 @@ public class TranslatorTest {
 			Locale.GERMAN,
 			"content",
 			"abc123",
+			null,
 			null
 		);
 
@@ -157,6 +162,7 @@ public class TranslatorTest {
 			Locale.GERMAN,
 			"content1",
 			"abc123",
+			null,
 			null
 		);
 
@@ -166,6 +172,7 @@ public class TranslatorTest {
 			Locale.GERMAN,
 			"content2",
 			"def456",
+			null,
 			null
 		);
 
@@ -187,6 +194,7 @@ public class TranslatorTest {
 			Locale.GERMAN,
 			"content",
 			"abc123",
+			null,
 			null
 		);
 
@@ -209,6 +217,7 @@ public class TranslatorTest {
 			Locale.GERMAN,
 			"content",
 			"abc123",
+			null,
 			null
 		);
 
@@ -232,6 +241,7 @@ public class TranslatorTest {
 			Locale.GERMAN,
 			"content",
 			"abc123",
+			null,
 			null
 		);
 

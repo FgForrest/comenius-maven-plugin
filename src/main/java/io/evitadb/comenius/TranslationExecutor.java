@@ -1,5 +1,6 @@
 package io.evitadb.comenius;
 
+import io.evitadb.comenius.model.FrontMatterTranslationHelper;
 import io.evitadb.comenius.model.MarkdownDocument;
 import io.evitadb.comenius.model.TranslationJob;
 import io.evitadb.comenius.model.TranslationResult;
@@ -18,6 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Executes translation jobs in parallel using a configurable thread pool.
@@ -38,6 +40,15 @@ public final class TranslationExecutor {
 	 */
 	@Nonnull
 	private final Map<Path, String> successfullyTranslatedFiles = new ConcurrentHashMap<>();
+	/**
+	 * Total number of jobs in the current execution batch.
+	 */
+	private int totalJobs;
+	/**
+	 * Counter for completed jobs (successful or failed) for progress reporting.
+	 */
+	@Nonnull
+	private final AtomicInteger completedJobs = new AtomicInteger(0);
 
 	/**
 	 * Creates a translation executor with the specified parallelism.
@@ -81,9 +92,18 @@ public final class TranslationExecutor {
 			return TranslationSummary.empty();
 		}
 
+		// Initialize progress tracking
+		this.totalJobs = jobs.size();
+		this.completedJobs.set(0);
+
 		// Submit all jobs and collect futures
 		final List<CompletableFuture<TranslationResult>> futures = new ArrayList<>(jobs.size());
 		for (final TranslationJob job : jobs) {
+			// Log when translation is being issued
+			final Path relativePath = this.sourceDir.relativize(job.getSourceFile().toAbsolutePath().normalize());
+			this.log.info("Translating: " + relativePath + " -> " +
+				job.getLocale().getDisplayName() + " (" + job.getLocale().toLanguageTag() + ")");
+
 			final CompletableFuture<TranslationResult> future = this.translator.translate(job)
 				.toCompletableFuture();
 			futures.add(future);
@@ -129,6 +149,9 @@ public final class TranslationExecutor {
 	) {
 		final TranslationJob job = result.job();
 		final Path relativePath = this.sourceDir.relativize(job.getSourceFile());
+		final int completed = this.completedJobs.incrementAndGet();
+		final String progressBar = formatProgressBar(completed, this.totalJobs);
+		final String localeInfo = job.getLocale().getDisplayName() + " (" + job.getLocale().toLanguageTag() + ")";
 
 		if (result.success()) {
 			try {
@@ -138,32 +161,70 @@ public final class TranslationExecutor {
 					job.getTargetFile(),
 					result.translatedContent()
 				);
-				this.log.info("[" + job.getType() + "] Translated: " + relativePath + " -> " + job.getTargetFile());
+				this.log.info(progressBar + " [" + job.getType() + "] " + relativePath + " -> " + localeInfo);
 				return summary.withSuccess(result.inputTokens(), result.outputTokens());
 			} catch (IOException e) {
-				this.log.error("[" + job.getType() + "] Failed to write " + relativePath + ": " + e.getMessage());
+				this.log.error(progressBar + " [" + job.getType() + "] Failed to write " + relativePath + ": " + e.getMessage());
 				return summary.withFailure();
 			}
 		} else {
-			this.log.error("[" + job.getType() + "] Translation failed for " + relativePath + ": " + result.errorMessage());
+			this.log.error(progressBar + " [" + job.getType() + "] Translation failed for " + relativePath + ": " + result.errorMessage());
 			return summary.withFailure();
 		}
 	}
 
 	/**
 	 * Writes a successful translation to the target file, adding the commit field.
+	 * If front matter fields were translated, extracts and merges them from the LLM response.
 	 *
 	 * @param result the successful translation result
 	 * @throws IOException if writing fails
 	 */
 	private void writeTranslation(@Nonnull TranslationResult result) throws IOException {
 		final TranslationJob job = result.job();
-		final MarkdownDocument doc = new MarkdownDocument(result.translatedContent());
+		final String translatedContent = result.translatedContent();
+
+		// Get the expected translatable fields from the job
+		final Map<String, String> expectedFields = job.getExtractedTranslatableFields();
+
+		// Parse translated field values from response and extract body
+		final Map<String, String> translatedFields = FrontMatterTranslationHelper
+			.parseTranslatedFields(translatedContent, expectedFields);
+		final String bodyContent = FrontMatterTranslationHelper
+			.extractBodyFromResponse(translatedContent, expectedFields);
+
+		// Create document from body content (without field blocks)
+		final MarkdownDocument doc = new MarkdownDocument(bodyContent);
+
+		// Merge translated front matter fields
+		for (final Map.Entry<String, String> entry : translatedFields.entrySet()) {
+			doc.setProperty(entry.getKey(), entry.getValue());
+		}
 
 		// Add commit field to front matter
 		doc.setProperty("commit", job.getCurrentCommit());
 
 		this.writer.write(doc, job.getTargetFile());
+	}
+
+	/**
+	 * Formats a progress bar string showing completion status.
+	 *
+	 * @param completed number of completed jobs
+	 * @param total     total number of jobs
+	 * @return formatted progress bar string, e.g., "[=====               ]  25%"
+	 */
+	@Nonnull
+	private String formatProgressBar(int completed, int total) {
+		final int percentage = (completed * 100) / total;
+		final int barWidth = 20;
+		final int filled = (completed * barWidth) / total;
+		final StringBuilder bar = new StringBuilder("[");
+		for (int i = 0; i < barWidth; i++) {
+			bar.append(i < filled ? "=" : " ");
+		}
+		bar.append("] ").append(String.format("%3d", percentage)).append("%");
+		return bar.toString();
 	}
 
 	/**

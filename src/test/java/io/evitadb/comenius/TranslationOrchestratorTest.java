@@ -77,6 +77,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
+			null,
 			null
 		);
 
@@ -109,6 +110,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
+			null,
 			null
 		);
 
@@ -139,6 +141,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
+			null,
 			null
 		);
 
@@ -161,6 +164,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
+			null,
 			null
 		);
 
@@ -180,6 +184,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
+			null,
 			null
 		);
 
@@ -212,6 +217,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
+			null,
 			null
 		);
 
@@ -235,7 +241,8 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
-			customInstructions
+			customInstructions,
+			null
 		);
 
 		assertTrue(jobOpt.isPresent());
@@ -257,6 +264,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
+			null,
 			null
 		);
 
@@ -279,6 +287,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
+			null,
 			null
 		);
 
@@ -303,6 +312,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
+			null,
 			null
 		);
 
@@ -324,6 +334,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
+			null,
 			null
 		);
 
@@ -353,6 +364,7 @@ public class TranslationOrchestratorTest {
 			Files.readString(sourceFile),
 			targetDir,
 			Locale.GERMAN,
+			null,
 			null
 		);
 

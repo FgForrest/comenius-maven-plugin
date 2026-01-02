@@ -74,6 +74,7 @@ The plugin provides three actions via the `comenius.action` parameter:
 | `dryRun`               | `comenius.dryRun`               | `true`        | When true, simulates without writing                |
 | `parallelism`          | `comenius.parallelism`          | `4`           | Number of parallel translation threads              |
 | `excludedFilePatterns` | `comenius.excludedFilePatterns` | -             | List of regex patterns to exclude directories/files |
+| `translatableFrontMatterFields` | `comenius.translatableFrontMatterFields` | - | Front matter fields to translate (e.g., title, perex) |
 
 ## Recommended Workflow
 
@@ -94,9 +95,7 @@ This displays all configured parameters and warns about missing required values.
 Before translating, validate that all source files are properly committed and links are valid:
 
 ```bash
-mvn comenius:run \
-    -Dcomenius.action=check \
-    -Dcomenius.sourceDir=docs/en
+mvn comenius:run -Dcomenius.action=check
 ```
 
 The check action verifies:
@@ -112,10 +111,7 @@ The check action verifies:
 Preview what would be translated without making any changes:
 
 ```bash
-mvn comenius:run \
-    -Dcomenius.action=translate \
-    -Dcomenius.sourceDir=docs/en \
-    -Dcomenius.dryRun=true
+mvn comenius:run -Dcomenius.action=translate -Dcomenius.dryRun=true
 ```
 
 This shows:
@@ -129,13 +125,7 @@ This shows:
 Test the translation with a small number of files first:
 
 ```bash
-mvn comenius:run \
-    -Dcomenius.action=translate \
-    -Dcomenius.sourceDir=docs/en \
-    -Dcomenius.llmUrl=https://api.openai.com/v1 \
-    -Dcomenius.llmToken=$OPENAI_API_KEY \
-    -Dcomenius.limit=3 \
-    -Dcomenius.dryRun=false
+mvn comenius:run -Dcomenius.action=translate -Dcomenius.limit=3
 ```
 
 Review the translated files to ensure quality meets your standards before proceeding with a full translation.
@@ -145,12 +135,7 @@ Review the translated files to ensure quality meets your standards before procee
 Once satisfied with the test results, run the full translation:
 
 ```bash
-mvn comenius:run \
-    -Dcomenius.action=translate \
-    -Dcomenius.sourceDir=docs/en \
-    -Dcomenius.llmUrl=https://api.openai.com/v1 \
-    -Dcomenius.llmToken=$OPENAI_API_KEY \
-    -Dcomenius.dryRun=false
+mvn comenius:run -Dcomenius.action=translate   
 ```
 
 ### Step 6: CI/CD Integration
@@ -279,6 +264,73 @@ Style guidelines:
 - Keep code examples unchanged
 - Preserve all markdown formatting
 ```
+
+## Translating Front Matter Fields
+
+By default, YAML front matter at the beginning of Markdown files is **not translated**. This includes fields like
+`author`, `date`, `motive`, and other metadata that should remain unchanged.
+
+However, some front matter fields contain user-facing text that should be translated, such as `title`, `perex`, or
+`description`. You can configure which fields should be translated using `translatableFrontMatterFields`.
+
+### Configuration
+
+```xml
+<configuration>
+    <translatableFrontMatterFields>
+        <field>title</field>
+        <field>perex</field>
+        <field>description</field>
+    </translatableFrontMatterFields>
+</configuration>
+```
+
+### Example
+
+**Source file (English):**
+```yaml
+---
+title: Getting Started
+perex: Learn how to set up and configure your first project
+author: John Doe
+date: 2024-01-15
+---
+# Getting Started
+...
+```
+
+**Translated file (German):**
+```yaml
+---
+title: Erste Schritte
+perex: Erfahren Sie, wie Sie Ihr erstes Projekt einrichten und konfigurieren
+author: John Doe
+date: 2024-01-15
+commit: abc123def456
+---
+# Erste Schritte
+...
+```
+
+Note that:
+- Only `title` and `perex` are translated (as configured)
+- `author` and `date` remain unchanged
+- The `commit` field is automatically added to track the source version
+
+### Common Translatable Fields
+
+| Field | Description |
+|-------|-------------|
+| `title` | Page or article title |
+| `perex` | Short description or lead paragraph |
+| `description` | Meta description for SEO |
+| `summary` | Brief content summary |
+| `keywords` | SEO keywords (if localized) |
+
+### Incremental Updates
+
+When using incremental translation mode, only front matter fields that have **changed** in the source file are
+re-translated. Unchanged fields preserve their existing translations.
 
 ## Excluding Directories and Files
 

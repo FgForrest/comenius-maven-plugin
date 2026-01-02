@@ -30,7 +30,7 @@ public class TranslationJobTest {
 	@DisplayName("shouldBuildSystemPromptForNewJob")
 	void shouldBuildSystemPromptForNewJob() {
 		final TranslateNewJob job = new TranslateNewJob(
-			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS
+			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS, null
 		);
 
 		final String systemPrompt = job.buildSystemPrompt(promptLoader);
@@ -44,7 +44,7 @@ public class TranslationJobTest {
 	@DisplayName("shouldBuildUserPromptForNewJob")
 	void shouldBuildUserPromptForNewJob() {
 		final TranslateNewJob job = new TranslateNewJob(
-			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS
+			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS, null
 		);
 
 		final String userPrompt = job.buildUserPrompt(promptLoader);
@@ -73,7 +73,7 @@ public class TranslationJobTest {
 		final String diff = "@@ -1,2 +1,2 @@\n-Original\n+Modified";
 
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
-			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS,
+			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS, null,
 			originalSource, existingTranslation, diff, "oldcommit123", 3
 		);
 
@@ -89,7 +89,7 @@ public class TranslationJobTest {
 	@DisplayName("shouldIncludeCustomInstructions")
 	void shouldIncludeCustomInstructions() {
 		final TranslateNewJob job = new TranslateNewJob(
-			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS
+			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS, null
 		);
 
 		final String userPrompt = job.buildUserPrompt(promptLoader);
@@ -101,7 +101,7 @@ public class TranslationJobTest {
 	@DisplayName("shouldHandleNullInstructions")
 	void shouldHandleNullInstructions() {
 		final TranslateNewJob job = new TranslateNewJob(
-			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, null
+			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, null, null
 		);
 
 		// Should not throw
@@ -114,7 +114,7 @@ public class TranslationJobTest {
 	void shouldIncludeLocaleInPrompt() {
 		final Locale french = Locale.FRENCH;
 		final TranslateNewJob job = new TranslateNewJob(
-			SOURCE_FILE, TARGET_FILE, french, SOURCE_CONTENT, CURRENT_COMMIT, null
+			SOURCE_FILE, TARGET_FILE, french, SOURCE_CONTENT, CURRENT_COMMIT, null, null
 		);
 
 		final String systemPrompt = job.buildSystemPrompt(promptLoader);
@@ -128,7 +128,7 @@ public class TranslationJobTest {
 	@DisplayName("shouldReturnCorrectJobType")
 	void shouldReturnCorrectJobType() {
 		final TranslateNewJob newJob = new TranslateNewJob(
-			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, null
+			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, null, null
 		);
 		assertEquals("NEW", newJob.getType());
 
@@ -143,7 +143,7 @@ public class TranslationJobTest {
 		final String longTranslatedCommit = "abcdef1234567890abcdef1234567890abcdef12";
 
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
-			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, longCurrentCommit, null,
+			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, longCurrentCommit, null, null,
 			"original", "translated", "diff", longTranslatedCommit, 5
 		);
 
@@ -157,7 +157,7 @@ public class TranslationJobTest {
 		final String shortCommit = "abc";
 
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
-			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, shortCommit, null,
+			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, shortCommit, null, null,
 			"original", "translated", "diff", "xyz", 1
 		);
 
@@ -169,7 +169,7 @@ public class TranslationJobTest {
 	@DisplayName("shouldReturnCorrectGetters")
 	void shouldReturnCorrectGetters() {
 		final TranslateNewJob job = new TranslateNewJob(
-			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS
+			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS, null
 		);
 
 		assertEquals(SOURCE_FILE, job.getSourceFile());
@@ -190,7 +190,7 @@ public class TranslationJobTest {
 		final int commitCount = 5;
 
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
-			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, null,
+			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, null, null,
 			originalSource, existingTranslation, diff, translatedCommit, commitCount
 		);
 
@@ -203,7 +203,7 @@ public class TranslationJobTest {
 
 	private TranslateIncrementalJob createIncrementalJob() {
 		return new TranslateIncrementalJob(
-			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS,
+			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS, null,
 			"original source", "existing translation", "diff", "oldcommit", 2
 		);
 	}

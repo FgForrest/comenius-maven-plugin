@@ -17,6 +17,7 @@ public class TranslationResultTest {
 		Locale.GERMAN,
 		"# Content",
 		"abc123",
+		null,
 		null
 	);
 
@@ -68,6 +69,7 @@ public class TranslationResultTest {
 			Locale.GERMAN,
 			"current",
 			"abc123",
+			null,
 			null,
 			"original",
 			"translated",

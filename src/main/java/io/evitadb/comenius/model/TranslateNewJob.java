@@ -6,6 +6,7 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -21,12 +22,13 @@ public final class TranslateNewJob extends TranslationJob {
 	/**
 	 * Creates a new translation job for a file without existing translation.
 	 *
-	 * @param sourceFile    the source markdown file path
-	 * @param targetFile    the target file path for the translation
-	 * @param locale        the target locale for translation
-	 * @param sourceContent the current content of the source file
-	 * @param currentCommit the current commit hash of the source file
-	 * @param instructions  optional custom instructions from .comenius-instructions files
+	 * @param sourceFile                    the source markdown file path
+	 * @param targetFile                    the target file path for the translation
+	 * @param locale                        the target locale for translation
+	 * @param sourceContent                 the current content of the source file
+	 * @param currentCommit                 the current commit hash of the source file
+	 * @param instructions                  optional custom instructions from .comenius-instructions files
+	 * @param translatableFrontMatterFields optional list of front matter field names to translate
 	 */
 	public TranslateNewJob(
 		@Nonnull Path sourceFile,
@@ -34,9 +36,10 @@ public final class TranslateNewJob extends TranslationJob {
 		@Nonnull Locale locale,
 		@Nonnull String sourceContent,
 		@Nonnull String currentCommit,
-		@Nullable String instructions
+		@Nullable String instructions,
+		@Nullable List<String> translatableFrontMatterFields
 	) {
-		super(sourceFile, targetFile, locale, sourceContent, currentCommit, instructions);
+		super(sourceFile, targetFile, locale, sourceContent, currentCommit, instructions, translatableFrontMatterFields);
 	}
 
 	@Override
@@ -50,6 +53,12 @@ public final class TranslateNewJob extends TranslationJob {
 	public String buildUserPrompt(@Nonnull PromptLoader loader) {
 		final Map<String, String> placeholders = new HashMap<>(getCommonPlaceholders());
 		placeholders.put("sourceContent", this.sourceContent);
+
+		// Extract and format front matter fields for translation
+		final Map<String, String> translatableFields = getExtractedTranslatableFields();
+		placeholders.put("frontMatterFields",
+			FrontMatterTranslationHelper.formatFieldsForPrompt(translatableFields));
+
 		return loader.loadAndInterpolate(USER_TEMPLATE, placeholders);
 	}
 
@@ -57,5 +66,14 @@ public final class TranslateNewJob extends TranslationJob {
 	@Nonnull
 	public String getType() {
 		return "NEW";
+	}
+
+	@Override
+	@Nonnull
+	public Map<String, String> getExtractedTranslatableFields() {
+		final MarkdownDocument sourceDoc = new MarkdownDocument(this.sourceContent);
+		return FrontMatterTranslationHelper.extractTranslatableFields(
+			sourceDoc, this.translatableFrontMatterFields
+		);
 	}
 }

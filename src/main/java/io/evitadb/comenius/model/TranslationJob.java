@@ -5,6 +5,7 @@ import io.evitadb.comenius.llm.PromptLoader;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -29,16 +30,19 @@ public sealed abstract class TranslationJob
 	protected final String currentCommit;
 	@Nullable
 	protected final String instructions;
+	@Nullable
+	protected final List<String> translatableFrontMatterFields;
 
 	/**
 	 * Creates a new translation job with the specified parameters.
 	 *
-	 * @param sourceFile    the source markdown file path
-	 * @param targetFile    the target file path for the translation
-	 * @param locale        the target locale for translation
-	 * @param sourceContent the current content of the source file
-	 * @param currentCommit the current commit hash of the source file
-	 * @param instructions  optional custom instructions from .comenius-instructions files
+	 * @param sourceFile                    the source markdown file path
+	 * @param targetFile                    the target file path for the translation
+	 * @param locale                        the target locale for translation
+	 * @param sourceContent                 the current content of the source file
+	 * @param currentCommit                 the current commit hash of the source file
+	 * @param instructions                  optional custom instructions from .comenius-instructions files
+	 * @param translatableFrontMatterFields optional list of front matter field names to translate
 	 */
 	protected TranslationJob(
 		@Nonnull Path sourceFile,
@@ -46,7 +50,8 @@ public sealed abstract class TranslationJob
 		@Nonnull Locale locale,
 		@Nonnull String sourceContent,
 		@Nonnull String currentCommit,
-		@Nullable String instructions
+		@Nullable String instructions,
+		@Nullable List<String> translatableFrontMatterFields
 	) {
 		this.sourceFile = Objects.requireNonNull(sourceFile, "sourceFile must not be null");
 		this.targetFile = Objects.requireNonNull(targetFile, "targetFile must not be null");
@@ -54,6 +59,7 @@ public sealed abstract class TranslationJob
 		this.sourceContent = Objects.requireNonNull(sourceContent, "sourceContent must not be null");
 		this.currentCommit = Objects.requireNonNull(currentCommit, "currentCommit must not be null");
 		this.instructions = instructions;
+		this.translatableFrontMatterFields = translatableFrontMatterFields;
 	}
 
 	/**
@@ -141,6 +147,25 @@ public sealed abstract class TranslationJob
 	public String getInstructions() {
 		return this.instructions;
 	}
+
+	/**
+	 * Returns the optional list of front matter field names to translate.
+	 *
+	 * @return list of field names or null if none
+	 */
+	@Nullable
+	public List<String> getTranslatableFrontMatterFields() {
+		return this.translatableFrontMatterFields;
+	}
+
+	/**
+	 * Returns the extracted translatable front matter fields for this job.
+	 * The returned map contains field names as keys and their original values.
+	 *
+	 * @return map of field names to values that should be translated
+	 */
+	@Nonnull
+	public abstract Map<String, String> getExtractedTranslatableFields();
 
 	/**
 	 * Creates a map of common placeholder values for prompt interpolation.

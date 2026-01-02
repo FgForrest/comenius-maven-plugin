@@ -107,6 +107,7 @@ public class TranslationExecutorTest {
 			Locale.GERMAN,
 			"# Original",
 			"abc123",
+			null,
 			null
 		);
 
@@ -131,6 +132,7 @@ public class TranslationExecutorTest {
 			Locale.GERMAN,
 			"# Content",
 			commitHash,
+			null,
 			null
 		);
 
@@ -162,12 +164,16 @@ public class TranslationExecutorTest {
 			Locale.GERMAN,
 			"content",
 			"abc123",
+			null,
 			null
 		);
 
 		executor.executeAll(List.of(job));
 
-		assertTrue(testLog.hasInfo("Translated"));
+		// Check for progress bar format: "[====================] 100% [NEW] log-test.md -> German (de)"
+		assertTrue(testLog.hasInfo("[NEW]"));
+		assertTrue(testLog.hasInfo("log-test.md"));
+		assertTrue(testLog.hasInfo("German"));
 	}
 
 	@Test
@@ -181,6 +187,7 @@ public class TranslationExecutorTest {
 			Locale.GERMAN,
 			"content",
 			"abc123",
+			null,
 			null
 		);
 
@@ -246,6 +253,7 @@ public class TranslationExecutorTest {
 				Locale.GERMAN,
 				"# Content " + i,
 				"commit" + i,
+				null,
 				null
 			));
 		}
