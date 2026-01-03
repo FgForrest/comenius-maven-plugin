@@ -153,6 +153,8 @@ public final class TranslationExecutor {
 		final String progressBar = formatProgressBar(completed, this.totalJobs);
 		final String localeInfo = job.getLocale().getDisplayName() + " (" + job.getLocale().toLanguageTag() + ")";
 
+		final String elapsedInfo = formatElapsedTime(result.elapsedMillis());
+
 		if (result.success()) {
 			try {
 				writeTranslation(result);
@@ -161,21 +163,28 @@ public final class TranslationExecutor {
 					job.getTargetFile(),
 					result.translatedContent()
 				);
-				this.log.info(progressBar + " [" + job.getType() + "] " + relativePath + " -> " + localeInfo);
+				this.log.info(progressBar + " [" + job.getType() + "] " + relativePath + " -> " + localeInfo + " (" + elapsedInfo + ")");
 				return summary.withSuccess(result.inputTokens(), result.outputTokens());
 			} catch (IOException e) {
 				this.log.error(progressBar + " [" + job.getType() + "] Failed to write " + relativePath + ": " + e.getMessage());
 				return summary.withFailure();
 			}
 		} else {
-			this.log.error(progressBar + " [" + job.getType() + "] Translation failed for " + relativePath + ": " + result.errorMessage());
+			this.log.error(progressBar + " [" + job.getType() + "] Translation failed for " + relativePath + " (" + elapsedInfo + "): " + result.errorMessage());
 			return summary.withFailure();
 		}
 	}
 
 	/**
-	 * Writes a successful translation to the target file, adding the commit field.
-	 * If front matter fields were translated, extracts and merges them from the LLM response.
+	 * Writes a successful translation to the target file, copying all front matter
+	 * fields from the source and merging translated fields.
+	 *
+	 * The process:
+	 * 1. Parse source document to get all properties (preserving order via LinkedHashMap)
+	 * 2. Create new document from LLM response body (no front matter)
+	 * 3. Copy ALL properties from source (non-translatable fields are preserved)
+	 * 4. Overwrite with translated fields (translatable fields get new values)
+	 * 5. Add commit field at end
 	 *
 	 * @param result the successful translation result
 	 * @throws IOException if writing fails
@@ -183,6 +192,9 @@ public final class TranslationExecutor {
 	private void writeTranslation(@Nonnull TranslationResult result) throws IOException {
 		final TranslationJob job = result.job();
 		final String translatedContent = result.translatedContent();
+
+		// Parse source document to get all properties (order preserved via LinkedHashMap)
+		final MarkdownDocument sourceDoc = new MarkdownDocument(job.getSourceContent());
 
 		// Get the expected translatable fields from the job
 		final Map<String, String> expectedFields = job.getExtractedTranslatableFields();
@@ -193,15 +205,18 @@ public final class TranslationExecutor {
 		final String bodyContent = FrontMatterTranslationHelper
 			.extractBodyFromResponse(translatedContent, expectedFields);
 
-		// Create document from body content (without field blocks)
+		// Create document from translated body content (empty properties initially)
 		final MarkdownDocument doc = new MarkdownDocument(bodyContent);
 
-		// Merge translated front matter fields
+		// Copy ALL properties from source (preserves order and non-translatable fields)
+		doc.mergeFrontMatterProperties(sourceDoc.getProperties());
+
+		// Overwrite with translated fields (updates value, keeps position in LinkedHashMap)
 		for (final Map.Entry<String, String> entry : translatedFields.entrySet()) {
 			doc.setProperty(entry.getKey(), entry.getValue());
 		}
 
-		// Add commit field to front matter
+		// Add commit field (added at end if not in source)
 		doc.setProperty("commit", job.getCurrentCommit());
 
 		this.writer.write(doc, job.getTargetFile());
@@ -225,6 +240,24 @@ public final class TranslationExecutor {
 		}
 		bar.append("] ").append(String.format("%3d", percentage)).append("%");
 		return bar.toString();
+	}
+
+	/**
+	 * Formats elapsed time in a human-readable format.
+	 * Shows seconds with one decimal place, or minutes and seconds for longer durations.
+	 *
+	 * @param millis elapsed time in milliseconds
+	 * @return formatted elapsed time string, e.g., "2.5s" or "1m 30s"
+	 */
+	@Nonnull
+	private String formatElapsedTime(long millis) {
+		if (millis < 60000) {
+			return String.format("%.1fs", millis / 1000.0);
+		} else {
+			final long minutes = millis / 60000;
+			final long seconds = (millis % 60000) / 1000;
+			return minutes + "m " + seconds + "s";
+		}
 	}
 
 	/**

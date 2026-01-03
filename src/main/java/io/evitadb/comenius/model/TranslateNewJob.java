@@ -52,7 +52,10 @@ public final class TranslateNewJob extends TranslationJob {
 	@Nonnull
 	public String buildUserPrompt(@Nonnull PromptLoader loader) {
 		final Map<String, String> placeholders = new HashMap<>(getCommonPlaceholders());
-		placeholders.put("sourceContent", this.sourceContent);
+
+		// Send only body content (no front matter) to LLM
+		final MarkdownDocument sourceDoc = new MarkdownDocument(this.sourceContent);
+		placeholders.put("sourceContent", sourceDoc.getBodyContent());
 
 		// Extract and format front matter fields for translation
 		final Map<String, String> translatableFields = getExtractedTranslatableFields();

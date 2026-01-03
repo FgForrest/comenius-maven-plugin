@@ -10,7 +10,7 @@ import org.commonmark.node.Node;
 import org.commonmark.parser.Parser;
 
 import javax.annotation.Nonnull;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -64,8 +64,8 @@ public class MarkdownDocument {
 
 		final YamlFrontMatterVisitor visitor = new YamlFrontMatterVisitor();
 		this.document.accept(visitor);
-		// Create a mutable copy of the properties map
-		this.properties = new HashMap<>(visitor.getData());
+		// Create a mutable copy of the properties map, preserving insertion order
+		this.properties = new LinkedHashMap<>(visitor.getData());
 	}
 
 	/**

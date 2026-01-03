@@ -27,9 +27,10 @@ public class TranslationResultTest {
 		final String translated = "# Inhalt";
 		final long inputTokens = 100;
 		final long outputTokens = 50;
+		final long elapsedMillis = 1500;
 
 		final TranslationResult result = TranslationResult.success(
-			SAMPLE_JOB, translated, inputTokens, outputTokens
+			SAMPLE_JOB, translated, inputTokens, outputTokens, elapsedMillis
 		);
 
 		assertTrue(result.success());
@@ -37,6 +38,7 @@ public class TranslationResultTest {
 		assertNull(result.errorMessage());
 		assertEquals(inputTokens, result.inputTokens());
 		assertEquals(outputTokens, result.outputTokens());
+		assertEquals(elapsedMillis, result.elapsedMillis());
 		assertEquals(SAMPLE_JOB, result.job());
 	}
 
@@ -44,14 +46,16 @@ public class TranslationResultTest {
 	@DisplayName("shouldCreateFailureResult")
 	void shouldCreateFailureResult() {
 		final String errorMessage = "API timeout";
+		final long elapsedMillis = 5000;
 
-		final TranslationResult result = TranslationResult.failure(SAMPLE_JOB, errorMessage);
+		final TranslationResult result = TranslationResult.failure(SAMPLE_JOB, errorMessage, elapsedMillis);
 
 		assertFalse(result.success());
 		assertNull(result.translatedContent());
 		assertEquals(errorMessage, result.errorMessage());
 		assertEquals(0, result.inputTokens());
 		assertEquals(0, result.outputTokens());
+		assertEquals(elapsedMillis, result.elapsedMillis());
 		assertEquals(SAMPLE_JOB, result.job());
 	}
 
@@ -59,7 +63,7 @@ public class TranslationResultTest {
 	@DisplayName("shouldReturnJobType")
 	void shouldReturnJobType() {
 		final TranslationResult newResult = TranslationResult.success(
-			SAMPLE_JOB, "content", 0, 0
+			SAMPLE_JOB, "content", 0, 0, 100
 		);
 		assertEquals("NEW", newResult.getType());
 
@@ -78,7 +82,7 @@ public class TranslationResultTest {
 			3
 		);
 		final TranslationResult updateResult = TranslationResult.success(
-			incrementalJob, "content", 0, 0
+			incrementalJob, "content", 0, 0, 100
 		);
 		assertEquals("UPDATE", updateResult.getType());
 	}
@@ -90,7 +94,7 @@ public class TranslationResultTest {
 		final long outputTokens = 6789;
 
 		final TranslationResult result = TranslationResult.success(
-			SAMPLE_JOB, "translated", inputTokens, outputTokens
+			SAMPLE_JOB, "translated", inputTokens, outputTokens, 2000
 		);
 
 		assertEquals(inputTokens, result.inputTokens());
@@ -101,7 +105,7 @@ public class TranslationResultTest {
 	@DisplayName("shouldHandleZeroTokens")
 	void shouldHandleZeroTokens() {
 		final TranslationResult result = TranslationResult.success(
-			SAMPLE_JOB, "translated", 0, 0
+			SAMPLE_JOB, "translated", 0, 0, 500
 		);
 
 		assertEquals(0, result.inputTokens());
@@ -112,10 +116,10 @@ public class TranslationResultTest {
 	@DisplayName("shouldPreserveOriginalJob")
 	void shouldPreserveOriginalJob() {
 		final TranslationResult successResult = TranslationResult.success(
-			SAMPLE_JOB, "content", 100, 50
+			SAMPLE_JOB, "content", 100, 50, 1000
 		);
 		final TranslationResult failureResult = TranslationResult.failure(
-			SAMPLE_JOB, "error"
+			SAMPLE_JOB, "error", 2000
 		);
 
 		assertSame(SAMPLE_JOB, successResult.job());

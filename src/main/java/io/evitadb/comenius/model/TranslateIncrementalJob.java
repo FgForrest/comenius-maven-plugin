@@ -79,8 +79,12 @@ public final class TranslateIncrementalJob extends TranslationJob {
 	@Nonnull
 	public String buildUserPrompt(@Nonnull PromptLoader loader) {
 		final Map<String, String> placeholders = new HashMap<>(getCommonPlaceholders());
-		placeholders.put("originalSource", this.originalSource);
-		placeholders.put("existingTranslation", this.existingTranslation);
+
+		// Send only body content (no front matter) to LLM
+		final MarkdownDocument originalDoc = new MarkdownDocument(this.originalSource);
+		final MarkdownDocument existingDoc = new MarkdownDocument(this.existingTranslation);
+		placeholders.put("originalSource", originalDoc.getBodyContent());
+		placeholders.put("existingTranslation", existingDoc.getBodyContent());
 		placeholders.put("diff", this.diff);
 
 		// Extract and format front matter fields for translation (only changed fields)

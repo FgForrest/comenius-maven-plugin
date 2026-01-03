@@ -68,6 +68,7 @@ public class Translator {
 		final String userPrompt = job.buildUserPrompt(this.promptLoader);
 
 		return CompletableFuture.supplyAsync(() -> {
+			final long startTime = System.currentTimeMillis();
 			try {
 				final List<ChatMessage> messages = List.of(
 					SystemMessage.from(systemPrompt),
@@ -75,6 +76,7 @@ public class Translator {
 				);
 
 				final ChatResponse response = this.model.chat(messages);
+				final long elapsedMillis = System.currentTimeMillis() - startTime;
 				final TokenUsage tokenUsage = response.tokenUsage();
 
 				final long inputTokens = tokenUsage != null ? tokenUsage.inputTokenCount() : 0;
@@ -84,10 +86,11 @@ public class Translator {
 				this.outputTokenCount.addAndGet(outputTokens);
 
 				final String translatedText = response.aiMessage().text();
-				return TranslationResult.success(job, translatedText, inputTokens, outputTokens);
+				return TranslationResult.success(job, translatedText, inputTokens, outputTokens, elapsedMillis);
 
 			} catch (Exception e) {
-				return TranslationResult.failure(job, e.getMessage());
+				final long elapsedMillis = System.currentTimeMillis() - startTime;
+				return TranslationResult.failure(job, e.getMessage(), elapsedMillis);
 			}
 		});
 	}
