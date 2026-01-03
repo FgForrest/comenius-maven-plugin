@@ -48,6 +48,8 @@ public final class LinkCorrector {
 	private final Pattern filePattern;
 	@Nullable
 	private final List<Pattern> exclusionPatterns;
+	@Nullable
+	private final List<String> translatableFrontMatterFields;
 	@Nonnull
 	private final Log log;
 
@@ -61,17 +63,19 @@ public final class LinkCorrector {
 	/**
 	 * Creates a LinkCorrector for the given source and target directories.
 	 *
-	 * @param sourceDir         the source directory containing original markdown files
-	 * @param targetDir         the target directory containing translated files
-	 * @param filePattern       regex pattern to identify translatable markdown files
-	 * @param exclusionPatterns patterns for files to exclude from translation
-	 * @param log               Maven log for output
+	 * @param sourceDir                    the source directory containing original markdown files
+	 * @param targetDir                    the target directory containing translated files
+	 * @param filePattern                  regex pattern to identify translatable markdown files
+	 * @param exclusionPatterns            patterns for files to exclude from translation
+	 * @param translatableFrontMatterFields field names in front matter that are translated
+	 * @param log                          Maven log for output
 	 */
 	public LinkCorrector(
 		@Nonnull Path sourceDir,
 		@Nonnull Path targetDir,
 		@Nonnull Pattern filePattern,
 		@Nullable List<Pattern> exclusionPatterns,
+		@Nullable List<String> translatableFrontMatterFields,
 		@Nonnull Log log
 	) {
 		this.sourceDir = Objects.requireNonNull(sourceDir, "sourceDir must not be null")
@@ -80,6 +84,7 @@ public final class LinkCorrector {
 			.toAbsolutePath().normalize();
 		this.filePattern = Objects.requireNonNull(filePattern, "filePattern must not be null");
 		this.exclusionPatterns = exclusionPatterns;
+		this.translatableFrontMatterFields = translatableFrontMatterFields;
 		this.log = Objects.requireNonNull(log, "log must not be null");
 	}
 
@@ -111,6 +116,7 @@ public final class LinkCorrector {
 
 	/**
 	 * Corrects links in a single translated file.
+	 * Processes both front matter fields and markdown body content.
 	 *
 	 * @param translatedFile    the translated file being processed
 	 * @param translatedContent the content of the translated file
@@ -136,7 +142,23 @@ public final class LinkCorrector {
 			translatedContent
 		);
 
-		final String correctedContent = replaceLinks(translatedContent, context);
+		// Parse the document
+		final MarkdownDocument document = new MarkdownDocument(translatedContent);
+
+		// Phase 1: Correct front matter fields
+		final Map<String, String> correctedFrontMatter = correctFrontMatter(document, context);
+
+		// Apply front matter corrections to document
+		for (final Map.Entry<String, String> entry : correctedFrontMatter.entrySet()) {
+			document.setProperty(entry.getKey(), entry.getValue());
+		}
+
+		// Phase 2: Correct body content
+		final String bodyContent = document.getBodyContent();
+		final String correctedBody = replaceLinks(bodyContent, context);
+
+		// Reconstruct full document
+		final String correctedContent = document.serializeFrontMatter() + correctedBody;
 
 		if (!context.errors.isEmpty()) {
 			return new LinkCorrectionResult(
@@ -144,6 +166,7 @@ public final class LinkCorrector {
 				correctedContent,
 				context.assetCorrections,
 				context.anchorCorrections,
+				context.frontMatterCorrections,
 				context.errors
 			);
 		}
@@ -153,6 +176,7 @@ public final class LinkCorrector {
 			correctedContent,
 			context.assetCorrections,
 			context.anchorCorrections,
+			context.frontMatterCorrections,
 			List.of()
 		);
 	}
@@ -473,6 +497,145 @@ public final class LinkCorrector {
 	}
 
 	/**
+	 * Pattern to detect file extensions (any dot followed by word characters at end of string).
+	 */
+	private static final Pattern FILE_EXTENSION_PATTERN = Pattern.compile(".*\\.\\w+$");
+
+	/**
+	 * Checks if a value appears to be a relative file path.
+	 * Returns true if the value looks like a path that might need correction.
+	 * The actual validation is done by checking if the file exists.
+	 *
+	 * @param value the value to check
+	 * @return true if this looks like a relative file path
+	 */
+	private boolean isLikelyFilePath(@Nonnull String value) {
+		if (value.isBlank()) {
+			return false;
+		}
+
+		// Skip external URLs
+		final String lower = value.toLowerCase();
+		if (lower.startsWith("http://") ||
+			lower.startsWith("https://") ||
+			lower.startsWith("mailto:") ||
+			lower.startsWith("tel:") ||
+			lower.startsWith("ftp://") ||
+			lower.startsWith("//")) {
+			return false;
+		}
+
+		// Skip absolute paths
+		if (value.startsWith("/")) {
+			return false;
+		}
+
+		// Path with directory separator
+		if (value.contains("/") || value.contains("\\")) {
+			return true;
+		}
+
+		// Has file extension (any extension)
+		return FILE_EXTENSION_PATTERN.matcher(value).matches();
+	}
+
+	/**
+	 * Corrects a non-translatable field value if it appears to be a relative file path.
+	 * Only corrects if the resolved path points to an existing file in the source directory.
+	 *
+	 * @param fieldName the field name (for debugging)
+	 * @param value     the field value to check and potentially correct
+	 * @param context   the correction context
+	 * @return the corrected value, or original if not a correctable path
+	 */
+	@Nonnull
+	private String correctNonTranslatableField(
+		@Nonnull String fieldName,
+		@Nonnull String value,
+		@Nonnull CorrectionContext context
+	) {
+		if (!isLikelyFilePath(value)) {
+			return value;
+		}
+
+		// Decode URL-encoded path for file resolution
+		final String decodedPath = URLDecoder.decode(value, StandardCharsets.UTF_8);
+
+		// Resolve the path relative to the source file's directory
+		final Path sourceFileDir = context.sourceFile.getParent();
+		final Path resolvedPath = sourceFileDir.resolve(decodedPath).normalize();
+
+		// Only correct if the file actually exists
+		if (!Files.exists(resolvedPath) || !Files.isRegularFile(resolvedPath)) {
+			return value;
+		}
+
+		// Calculate relative path from translated file location to the source asset
+		final Path translatedDir = context.translatedFile.getParent();
+		final Path relativePath = translatedDir.relativize(resolvedPath);
+
+		// Convert to Unix-style path separators for consistency
+		final String correctedPath = relativePath.toString().replace('\\', '/');
+
+		// Only count as correction if path actually changed
+		if (!correctedPath.equals(value)) {
+			context.frontMatterCorrections++;
+			this.log.debug("Corrected front matter field '" + fieldName + "': " + value + " -> " + correctedPath);
+		}
+
+		return correctedPath;
+	}
+
+	/**
+	 * Corrects links in front matter fields.
+	 * Translatable fields get full link correction (anchor translation + asset paths).
+	 * Non-translatable fields are checked for file paths and corrected if the file exists.
+	 *
+	 * @param document the parsed MarkdownDocument
+	 * @param context  the correction context
+	 * @return map of field names to corrected values (only fields that changed)
+	 */
+	@Nonnull
+	private Map<String, String> correctFrontMatter(
+		@Nonnull MarkdownDocument document,
+		@Nonnull CorrectionContext context
+	) {
+		final Map<String, String> correctedFields = new HashMap<>();
+		final Map<String, List<String>> properties = document.getProperties();
+
+		for (final Map.Entry<String, List<String>> entry : properties.entrySet()) {
+			final String fieldName = entry.getKey();
+			final List<String> values = entry.getValue();
+
+			if (values == null || values.isEmpty()) {
+				continue;
+			}
+
+			// Get the first value (single-value fields)
+			final String originalValue = values.get(0);
+			if (originalValue == null || originalValue.isBlank()) {
+				continue;
+			}
+
+			final String correctedValue;
+			if (this.translatableFrontMatterFields != null &&
+				this.translatableFrontMatterFields.contains(fieldName)) {
+				// Translatable field: apply full markdown link correction
+				correctedValue = replaceLinks(originalValue, context);
+			} else {
+				// Non-translatable field: check if it's a file path
+				correctedValue = correctNonTranslatableField(fieldName, originalValue, context);
+			}
+
+			if (!correctedValue.equals(originalValue)) {
+				correctedFields.put(fieldName, correctedValue);
+			}
+		}
+
+		return correctedFields;
+	}
+
+	/**
 	 * Determines if a path points to a translatable markdown file.
 	 *
 	 * @param path the path to check
@@ -516,6 +679,7 @@ public final class LinkCorrector {
 		final String translatedContent;
 		int assetCorrections = 0;
 		int anchorCorrections = 0;
+		int frontMatterCorrections = 0;
 		@Nonnull
 		final List<String> errors = new ArrayList<>();
 

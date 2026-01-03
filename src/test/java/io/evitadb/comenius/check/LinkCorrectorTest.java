@@ -74,6 +74,7 @@ public class LinkCorrectorTest {
 			this.targetDir,
 			Pattern.compile("(?i).*\\.md"),
 			null,
+			null,
 			this.mockLog
 		);
 
@@ -113,6 +114,7 @@ public class LinkCorrectorTest {
 			this.targetDir,
 			Pattern.compile("(?i).*\\.md"),
 			null,
+			null,
 			this.mockLog
 		);
 
@@ -148,6 +150,7 @@ public class LinkCorrectorTest {
 			this.sourceDir,
 			this.targetDir,
 			Pattern.compile("(?i).*\\.md"),
+			null,
 			null,
 			this.mockLog
 		);
@@ -186,6 +189,7 @@ public class LinkCorrectorTest {
 			this.targetDir,
 			Pattern.compile("(?i).*\\.md"),
 			null,
+			null,
 			this.mockLog
 		);
 
@@ -212,6 +216,7 @@ public class LinkCorrectorTest {
 			this.sourceDir,
 			this.targetDir,
 			Pattern.compile("(?i).*\\.md"),
+			null,
 			null,
 			this.mockLog
 		);
@@ -241,6 +246,7 @@ public class LinkCorrectorTest {
 			this.targetDir,
 			Pattern.compile("(?i).*\\.md"),
 			null,
+			null,
 			this.mockLog
 		);
 
@@ -265,6 +271,7 @@ public class LinkCorrectorTest {
 			this.sourceDir,
 			this.targetDir,
 			Pattern.compile("(?i).*\\.md"),
+			null,
 			null,
 			this.mockLog
 		);
@@ -301,6 +308,7 @@ public class LinkCorrectorTest {
 			this.targetDir,
 			Pattern.compile("(?i).*\\.md"),
 			null,
+			null,
 			this.mockLog
 		);
 
@@ -323,6 +331,7 @@ public class LinkCorrectorTest {
 			this.sourceDir,
 			this.targetDir,
 			Pattern.compile("(?i).*\\.md"),
+			null,
 			null,
 			this.mockLog
 		);
@@ -351,6 +360,7 @@ public class LinkCorrectorTest {
 			this.targetDir,
 			Pattern.compile("(?i).*\\.md"),
 			List.of(Pattern.compile("CHANGELOG\\.md")),  // Exclude CHANGELOG.md
+			null,
 			this.mockLog
 		);
 
@@ -382,6 +392,7 @@ public class LinkCorrectorTest {
 			this.targetDir,
 			Pattern.compile("(?i).*\\.md"),
 			null,
+			null,
 			this.mockLog
 		);
 
@@ -410,6 +421,7 @@ public class LinkCorrectorTest {
 			this.sourceDir,
 			this.targetDir,
 			Pattern.compile("(?i).*\\.md"),
+			null,
 			null,
 			this.mockLog
 		);
@@ -445,6 +457,7 @@ public class LinkCorrectorTest {
 			this.targetDir,
 			Pattern.compile("(?i).*\\.md"),
 			null,
+			null,
 			this.mockLog
 		);
 
@@ -454,6 +467,330 @@ public class LinkCorrectorTest {
 		assertEquals(1, result.anchorCorrections());
 		assertTrue(result.correctedContent().contains("#novedades-de-2024"),
 			"Expected translated anchor, got: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("corrects links in translatable front matter fields")
+	public void shouldCorrectLinksInTranslatableFrontMatterField() throws Exception {
+		// Setup source - use simple ASCII headings to avoid accent issues
+		writeFile(this.sourceDir.resolve("guide.md"), """
+			---
+			title: Original Title
+			perex: Check the [setup](#setup) section
+			---
+			# Introduction
+			## Setup
+			""");
+
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent = """
+			---
+			title: Titulo Traducido
+			perex: Mira la seccion [ajustes](#setup)
+			---
+			# Introduccion
+			## Ajustes
+			""";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			List.of("title", "perex"),  // translatable fields
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(1, result.anchorCorrections());
+		assertTrue(result.correctedContent().contains("#ajustes"),
+			"Expected translated anchor in perex, got: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("corrects file path in non-translatable front matter field when file exists")
+	public void shouldCorrectPathInNonTranslatableFrontMatterField() throws Exception {
+		// Setup source with an image asset
+		Files.createDirectories(this.sourceDir.resolve("images"));
+		writeFile(this.sourceDir.resolve("guide.md"), """
+			---
+			title: Guide
+			image: images/hero.png
+			---
+			# Guide
+			""");
+		writeFile(this.sourceDir.resolve("images/hero.png"), "PNG");
+
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent = """
+			---
+			title: Guía
+			image: images/hero.png
+			---
+			# Guía
+			""";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			List.of("title"),  // only title is translatable, image is not
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(1, result.frontMatterCorrections());
+		// Path should be corrected to navigate from target/es back to source/images
+		assertTrue(result.correctedContent().contains("source/images/hero.png"),
+			"Expected corrected path in image field, got: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("does not correct path in front matter when file does not exist")
+	public void shouldNotCorrectNonExistentPath() throws Exception {
+		// Setup source without the referenced file
+		writeFile(this.sourceDir.resolve("guide.md"), """
+			---
+			title: Guide
+			image: images/nonexistent.png
+			---
+			# Guide
+			""");
+
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent = """
+			---
+			title: Guía
+			image: images/nonexistent.png
+			---
+			# Guía
+			""";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			List.of("title"),
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(0, result.frontMatterCorrections());
+		// Original path should be preserved
+		assertTrue(result.correctedContent().contains("image: images/nonexistent.png"),
+			"Expected unchanged path, got: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("does not correct external URLs in front matter")
+	public void shouldNotCorrectExternalUrlsInFrontMatter() throws Exception {
+		writeFile(this.sourceDir.resolve("guide.md"), """
+			---
+			title: Guide
+			image: https://example.com/logo.png
+			---
+			# Guide
+			""");
+
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent = """
+			---
+			title: Guía
+			image: https://example.com/logo.png
+			---
+			# Guía
+			""";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			List.of("title"),
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(0, result.frontMatterCorrections());
+		assertTrue(result.correctedContent().contains("https://example.com/logo.png"),
+			"Expected unchanged URL, got: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("does not correct absolute paths in front matter")
+	public void shouldNotCorrectAbsolutePathsInFrontMatter() throws Exception {
+		writeFile(this.sourceDir.resolve("guide.md"), """
+			---
+			title: Guide
+			image: /images/logo.png
+			---
+			# Guide
+			""");
+
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent = """
+			---
+			title: Guía
+			image: /images/logo.png
+			---
+			# Guía
+			""";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			List.of("title"),
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(0, result.frontMatterCorrections());
+		assertTrue(result.correctedContent().contains("image: /images/logo.png"),
+			"Expected unchanged absolute path, got: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("tracks front matter corrections separately from body corrections")
+	public void shouldTrackFrontMatterCorrectionsSeparately() throws Exception {
+		// Setup source with both body and front matter links
+		Files.createDirectories(this.sourceDir.resolve("images"));
+		writeFile(this.sourceDir.resolve("guide.md"), """
+			---
+			title: Guide
+			thumbnail: images/thumb.png
+			---
+			# Introduction
+			## Setup
+			![logo](images/logo.png)
+			""");
+		writeFile(this.sourceDir.resolve("images/thumb.png"), "PNG");
+		writeFile(this.sourceDir.resolve("images/logo.png"), "PNG");
+
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent = """
+			---
+			title: Guía
+			thumbnail: images/thumb.png
+			---
+			# Introducción
+			## Configuración
+			![logo](images/logo.png)
+			[setup](#setup)
+			""";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			List.of("title"),
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(1, result.frontMatterCorrections(), "Expected 1 front matter correction");
+		assertEquals(1, result.assetCorrections(), "Expected 1 asset correction");
+		assertEquals(1, result.anchorCorrections(), "Expected 1 anchor correction");
+		assertEquals(3, result.totalCorrections(), "Expected 3 total corrections");
+	}
+
+	@Test
+	@DisplayName("handles image link corrections in translatable front matter fields")
+	public void shouldCorrectImageLinksInTranslatableFrontMatterField() throws Exception {
+		// Setup source with image link in perex
+		Files.createDirectories(this.sourceDir.resolve("images"));
+		writeFile(this.sourceDir.resolve("guide.md"), """
+			---
+			title: Original Title
+			perex: Welcome! ![logo](images/logo.png)
+			---
+			# Guide
+			""");
+		writeFile(this.sourceDir.resolve("images/logo.png"), "PNG");
+
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent = """
+			---
+			title: Título
+			perex: ¡Bienvenido! ![logo](images/logo.png)
+			---
+			# Guía
+			""";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			List.of("title", "perex"),
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(1, result.assetCorrections());
+		// The perex should contain corrected path
+		assertTrue(result.correctedContent().contains("source/images/logo.png"),
+			"Expected corrected image path in perex, got: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("preserves front matter fields without corrections")
+	public void shouldPreserveFrontMatterFieldsWithoutCorrections() throws Exception {
+		writeFile(this.sourceDir.resolve("guide.md"), """
+			---
+			title: Guide
+			author: John Doe
+			date: 2024-01-15
+			---
+			# Guide
+			""");
+
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent = """
+			---
+			title: Guía
+			author: John Doe
+			date: 2024-01-15
+			---
+			# Guía
+			""";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			List.of("title"),
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(0, result.frontMatterCorrections());
+		assertTrue(result.correctedContent().contains("author: John Doe"),
+			"Expected author field preserved");
+		assertTrue(result.correctedContent().contains("date: 2024-01-15") ||
+				result.correctedContent().contains("date: '2024-01-15'"),
+			"Expected date field preserved");
 	}
 
 	private void writeFile(Path path, String content) throws IOException {

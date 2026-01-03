@@ -10,17 +10,19 @@ import java.util.Objects;
  * Contains the corrected content, statistics about corrections made,
  * and any errors encountered during the correction process.
  *
- * @param targetFile        the translated file that was processed
- * @param correctedContent  the content with corrected links
- * @param assetCorrections  number of asset link corrections made
- * @param anchorCorrections number of anchor corrections made
- * @param errors            list of error messages encountered during correction
+ * @param targetFile              the translated file that was processed
+ * @param correctedContent        the content with corrected links
+ * @param assetCorrections        number of asset link corrections made
+ * @param anchorCorrections       number of anchor corrections made
+ * @param frontMatterCorrections  number of front matter field corrections made
+ * @param errors                  list of error messages encountered during correction
  */
 public record LinkCorrectionResult(
 	@Nonnull Path targetFile,
 	@Nonnull String correctedContent,
 	int assetCorrections,
 	int anchorCorrections,
+	int frontMatterCorrections,
 	@Nonnull List<String> errors
 ) {
 
@@ -44,12 +46,12 @@ public record LinkCorrectionResult(
 	}
 
 	/**
-	 * Returns total number of corrections made (assets + anchors).
+	 * Returns total number of corrections made (assets + anchors + front matter).
 	 *
 	 * @return total correction count
 	 */
 	public int totalCorrections() {
-		return this.assetCorrections + this.anchorCorrections;
+		return this.assetCorrections + this.anchorCorrections + this.frontMatterCorrections;
 	}
 
 	/**
@@ -64,7 +66,7 @@ public record LinkCorrectionResult(
 		@Nonnull Path targetFile,
 		@Nonnull String content
 	) {
-		return new LinkCorrectionResult(targetFile, content, 0, 0, List.of());
+		return new LinkCorrectionResult(targetFile, content, 0, 0, 0, List.of());
 	}
 
 	/**
@@ -81,6 +83,6 @@ public record LinkCorrectionResult(
 		@Nonnull String content,
 		@Nonnull String error
 	) {
-		return new LinkCorrectionResult(targetFile, content, 0, 0, List.of(error));
+		return new LinkCorrectionResult(targetFile, content, 0, 0, 0, List.of(error));
 	}
 }

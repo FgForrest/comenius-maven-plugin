@@ -468,7 +468,8 @@ public class ComeniusMojo extends AbstractMojo {
 		@Nonnull Path gitRoot
 	) {
 		final LinkCorrector corrector = new LinkCorrector(
-			sourceDir, targetDir, filePattern, exclusionPatterns, log
+			sourceDir, targetDir, filePattern, exclusionPatterns,
+			this.translatableFrontMatterFields, log
 		);
 
 		// Read actual content from disk (includes commit field added during translation)
