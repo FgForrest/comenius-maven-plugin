@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
@@ -36,10 +37,9 @@ public final class TranslationExecutor {
 	private final Path sourceDir;
 	/**
 	 * Tracks successfully translated files for post-processing (e.g., link correction).
-	 * Key is the target file path, value is the translated content before writing.
 	 */
 	@Nonnull
-	private final Map<Path, String> successfullyTranslatedFiles = new ConcurrentHashMap<>();
+	private final Set<Path> successfullyTranslatedFiles = ConcurrentHashMap.newKeySet();
 	/**
 	 * Total number of jobs in the current execution batch.
 	 */
@@ -117,7 +117,8 @@ public final class TranslationExecutor {
 	/**
 	 * Executes all translation jobs and returns a summary of results.
 	 * Jobs are executed in parallel up to the configured parallelism limit.
-	 * Individual failures do not stop other jobs from executing.
+	 * Each result is processed immediately when ready, allowing request/response
+	 * strings to be garbage collected after disk write.
 	 *
 	 * @param jobs the list of translation jobs to execute
 	 * @return summary with success/failure counts and token usage
@@ -130,42 +131,32 @@ public final class TranslationExecutor {
 			return TranslationSummary.empty();
 		}
 
-		// Initialize progress tracking
 		this.totalJobs = jobs.size();
 		this.completedJobs.set(0);
 
-		// Submit all jobs and collect futures
-		final List<CompletableFuture<TranslationResult>> futures = new ArrayList<>(jobs.size());
+		// Submit all jobs with result processing chained - allows early GC of content
+		final List<CompletableFuture<TranslationSummary>> futures = new ArrayList<>(jobs.size());
 		for (final TranslationJob job : jobs) {
-			// Log when translation is being issued
 			final Path relativePath = this.sourceDir.relativize(job.getSourceFile().toAbsolutePath().normalize());
 			this.log.info("Translating: " + relativePath + " -> " +
 				job.getLocale().getDisplayName() + " (" + job.getLocale().toLanguageTag() + ")");
 
-			final CompletableFuture<TranslationResult> future = this.translator.translate(job)
+			final CompletableFuture<TranslationSummary> future = this.translator.translate(job)
+				.thenApply(this::processResult)
 				.toCompletableFuture();
 			futures.add(future);
 		}
 
 		// Wait for all to complete
-		final CompletableFuture<Void> allFutures = CompletableFuture.allOf(
-			futures.toArray(new CompletableFuture[0])
-		);
+		CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
-		try {
-			allFutures.join();
-		} catch (Exception e) {
-			this.log.error("Error waiting for translations to complete: " + e.getMessage());
-		}
-
-		// Process results
+		// Aggregate summaries
 		TranslationSummary summary = TranslationSummary.empty();
-		for (final CompletableFuture<TranslationResult> future : futures) {
+		for (final CompletableFuture<TranslationSummary> future : futures) {
 			try {
-				final TranslationResult result = future.get();
-				summary = processResult(result, summary);
+				summary = summary.add(future.get());
 			} catch (Exception e) {
-				this.log.error("Failed to get translation result: " + e.getMessage());
+				this.log.error("Failed to get translation summary: " + e.getMessage());
 				summary = summary.withFailure();
 			}
 		}
@@ -174,42 +165,35 @@ public final class TranslationExecutor {
 	}
 
 	/**
-	 * Processes a single translation result: writes successful translations and updates summary.
+	 * Processes a single translation result: writes successful translations and returns summary.
+	 * This method is called immediately when a translation completes, allowing the translation
+	 * content to be garbage collected after the file is written.
 	 *
-	 * @param result  the translation result to process
-	 * @param summary the current summary to update
-	 * @return updated summary
+	 * @param result the translation result to process
+	 * @return summary for this single result
 	 */
 	@Nonnull
-	private TranslationSummary processResult(
-		@Nonnull TranslationResult result,
-		@Nonnull TranslationSummary summary
-	) {
+	private TranslationSummary processResult(@Nonnull TranslationResult result) {
 		final TranslationJob job = result.job();
 		final Path relativePath = this.sourceDir.relativize(job.getSourceFile());
 		final int completed = this.completedJobs.incrementAndGet();
 		final String progressBar = formatProgressBar(completed, this.totalJobs);
 		final String localeInfo = job.getLocale().getDisplayName() + " (" + job.getLocale().toLanguageTag() + ")";
-
 		final String elapsedInfo = formatElapsedTime(result.elapsedMillis());
 
 		if (result.success()) {
 			try {
 				writeTranslation(result);
-				// Track for post-processing (link correction)
-				this.successfullyTranslatedFiles.put(
-					job.getTargetFile(),
-					result.translatedContent()
-				);
+				this.successfullyTranslatedFiles.add(job.getTargetFile());
 				this.log.info(progressBar + " [" + job.getType() + "] " + relativePath + " -> " + localeInfo + " (" + elapsedInfo + ")");
-				return summary.withSuccess(result.inputTokens(), result.outputTokens());
+				return new TranslationSummary(1, 0, 0, result.inputTokens(), result.outputTokens());
 			} catch (IOException e) {
 				this.log.error(progressBar + " [" + job.getType() + "] Failed to write " + relativePath + ": " + e.getMessage());
-				return summary.withFailure();
+				return new TranslationSummary(0, 1, 0, 0, 0);
 			}
 		} else {
 			this.log.error(progressBar + " [" + job.getType() + "] Translation failed for " + relativePath + " (" + elapsedInfo + "): " + result.errorMessage());
-			return summary.withFailure();
+			return new TranslationSummary(0, 1, 0, 0, 0);
 		}
 	}
 
@@ -315,15 +299,14 @@ public final class TranslationExecutor {
 	}
 
 	/**
-	 * Returns a copy of the successfully translated files map.
-	 * Key is the target file path, value is the translated content before writing.
+	 * Returns a copy of the successfully translated file paths.
 	 * This is useful for post-processing steps like link correction.
 	 *
-	 * @return immutable copy of successfully translated files
+	 * @return immutable copy of successfully translated file paths
 	 */
 	@Nonnull
-	public Map<Path, String> getSuccessfullyTranslatedFiles() {
-		return Map.copyOf(this.successfullyTranslatedFiles);
+	public Set<Path> getSuccessfullyTranslatedFiles() {
+		return Set.copyOf(this.successfullyTranslatedFiles);
 	}
 
 	/**
