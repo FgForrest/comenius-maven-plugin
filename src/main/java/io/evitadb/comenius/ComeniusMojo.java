@@ -33,6 +33,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
@@ -225,15 +227,18 @@ public class ComeniusMojo extends AbstractMojo {
 			final GitService gitService = new GitService(gitRoot);
 
 			// Create translator and executor only for non-dry-run
+			// Use a shared ForkJoinPool for all parallel work (translations and link correction)
 			Translator translator = null;
 			TranslationExecutor executor = null;
+			ForkJoinPool translationPool = null;
 			if (!this.dryRun) {
+				translationPool = new ForkJoinPool(this.parallelism);
 				final ChatModel chatModel = ChatModelFactory.create(
 					this.llmProvider, this.llmUrl, this.llmToken, this.llmModel
 				);
 				final PromptLoader promptLoader = new PromptLoader();
-				translator = new Translator(chatModel, promptLoader);
-				executor = new TranslationExecutor(this.parallelism, translator, new Writer(), log, root);
+				translator = new Translator(chatModel, promptLoader, translationPool);
+				executor = new TranslationExecutor(translationPool, translator, new Writer(), log, root);
 			}
 
 			// Process each target locale
@@ -322,13 +327,13 @@ public class ComeniusMojo extends AbstractMojo {
 					log.info("Input tokens: " + summary.inputTokens());
 					log.info("Output tokens: " + summary.outputTokens());
 
-					// Link correction phase
+					// Link correction phase (uses same ForkJoinPool for parallel processing)
 					if (summary.successCount() > 0) {
 						log.info("--- Link Correction Phase ---");
 						final Map<Path, String> translatedFiles = executor.getSuccessfullyTranslatedFiles();
 						correctLinksInTranslatedFiles(
 							log, root, targetDir, pattern, exclusionPatterns,
-							translatedFiles, gitService, gitRoot
+							translatedFiles, gitService, gitRoot, executor.getExecutor()
 						);
 					}
 				}
@@ -456,6 +461,7 @@ public class ComeniusMojo extends AbstractMojo {
 	 * @param translatedFiles   map of translated file paths to their content
 	 * @param gitService        git service for validation
 	 * @param gitRoot           git repository root
+	 * @param executor          executor for parallel link correction
 	 */
 	private void correctLinksInTranslatedFiles(
 		@Nonnull Log log,
@@ -465,7 +471,8 @@ public class ComeniusMojo extends AbstractMojo {
 		@Nullable List<Pattern> exclusionPatterns,
 		@Nonnull Map<Path, String> translatedFiles,
 		@Nonnull GitService gitService,
-		@Nonnull Path gitRoot
+		@Nonnull Path gitRoot,
+		@Nonnull Executor executor
 	) {
 		final LinkCorrector corrector = new LinkCorrector(
 			sourceDir, targetDir, filePattern, exclusionPatterns,
@@ -483,7 +490,7 @@ public class ComeniusMojo extends AbstractMojo {
 			}
 		}
 
-		final List<LinkCorrectionResult> results = corrector.correctAll(filesWithContent);
+		final List<LinkCorrectionResult> results = corrector.correctAllParallel(filesWithContent, executor);
 
 		// Write corrected files and collect statistics
 		final Writer writer = new Writer();

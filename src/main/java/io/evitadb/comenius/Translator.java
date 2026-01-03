@@ -18,6 +18,8 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -28,28 +30,49 @@ public class Translator {
 
 	private final ChatModel model;
 	private final PromptLoader promptLoader;
+	@Nullable
+	private final Executor executor;
 	private final AtomicLong inputTokenCount = new AtomicLong(0);
 	private final AtomicLong outputTokenCount = new AtomicLong(0);
 
 	/**
-	 * Create a Translator using provided ChatLanguageModel and PromptLoader.
+	 * Create a Translator using provided ChatModel, PromptLoader, and Executor.
 	 * The model is expected to perform the actual LLM call; in tests it can be mocked.
+	 * The executor is used for async operations; if null, ForkJoinPool.commonPool() is used.
+	 *
+	 * @param model        non-null chat model to use
+	 * @param promptLoader non-null prompt loader for loading templates
+	 * @param executor     executor for async operations; may be null to use common pool
+	 */
+	public Translator(
+		@Nonnull ChatModel model,
+		@Nonnull PromptLoader promptLoader,
+		@Nullable Executor executor
+	) {
+		this.model = Objects.requireNonNull(model, "model must not be null");
+		this.promptLoader = Objects.requireNonNull(promptLoader, "promptLoader must not be null");
+		this.executor = executor;
+	}
+
+	/**
+	 * Create a Translator using provided ChatLanguageModel and PromptLoader.
+	 * Uses ForkJoinPool.commonPool() for async operations.
 	 *
 	 * @param model        non-null chat model to use
 	 * @param promptLoader non-null prompt loader for loading templates
 	 */
 	public Translator(@Nonnull ChatModel model, @Nonnull PromptLoader promptLoader) {
-		this.model = Objects.requireNonNull(model, "model must not be null");
-		this.promptLoader = Objects.requireNonNull(promptLoader, "promptLoader must not be null");
+		this(model, promptLoader, null);
 	}
 
 	/**
 	 * Create a Translator using provided ChatModel with a default PromptLoader.
+	 * Uses ForkJoinPool.commonPool() for async operations.
 	 *
 	 * @param model non-null chat model to use
 	 */
 	public Translator(@Nonnull ChatModel model) {
-		this(model, new PromptLoader());
+		this(model, new PromptLoader(), null);
 	}
 
 	/**
@@ -67,6 +90,7 @@ public class Translator {
 		final String systemPrompt = job.buildSystemPrompt(this.promptLoader);
 		final String userPrompt = job.buildUserPrompt(this.promptLoader);
 
+		final Executor effectiveExecutor = this.executor != null ? this.executor : ForkJoinPool.commonPool();
 		return CompletableFuture.supplyAsync(() -> {
 			final long startTime = System.currentTimeMillis();
 			try {
@@ -92,7 +116,7 @@ public class Translator {
 				final long elapsedMillis = System.currentTimeMillis() - startTime;
 				return TranslationResult.failure(job, e.getMessage(), elapsedMillis);
 			}
-		});
+		}, effectiveExecutor);
 	}
 
 	/**
@@ -129,6 +153,7 @@ public class Translator {
 		messages.add(UserMessage.from(text));
 
 		// Offload to a separate thread as a minimal async behavior; in real usage, model may block
+		final Executor effectiveExecutor = this.executor != null ? this.executor : ForkJoinPool.commonPool();
 		return CompletableFuture.supplyAsync(() -> {
 			final ChatResponse response = this.model.chat(messages);
 			final TokenUsage tokenUsage = response.tokenUsage();
@@ -137,7 +162,7 @@ public class Translator {
 				this.outputTokenCount.addAndGet(tokenUsage.outputTokenCount());
 			}
 			return response.aiMessage().text();
-		});
+		}, effectiveExecutor);
 	}
 
 	/**

@@ -16,6 +16,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -56,9 +59,10 @@ public final class LinkCorrector {
 	/**
 	 * Cache of source file heading indices for efficient anchor mapping.
 	 * Key is the absolute normalized path to the source file.
+	 * Uses ConcurrentHashMap for thread-safe access during parallel processing.
 	 */
 	@Nonnull
-	private final Map<Path, HeadingAnchorIndex> sourceAnchorCache = new HashMap<>();
+	private final Map<Path, HeadingAnchorIndex> sourceAnchorCache = new ConcurrentHashMap<>();
 
 	/**
 	 * Creates a LinkCorrector for the given source and target directories.
@@ -112,6 +116,41 @@ public final class LinkCorrector {
 			}
 		}
 		return results;
+	}
+
+	/**
+	 * Corrects links in multiple translated files in parallel.
+	 * Uses the provided executor for parallel processing.
+	 *
+	 * @param translatedFiles map of target file path to translated content
+	 * @param executor        the executor to use for parallel processing
+	 * @return list of correction results for each file
+	 */
+	@Nonnull
+	public List<LinkCorrectionResult> correctAllParallel(
+		@Nonnull Map<Path, String> translatedFiles,
+		@Nonnull Executor executor
+	) {
+		Objects.requireNonNull(translatedFiles, "translatedFiles must not be null");
+		Objects.requireNonNull(executor, "executor must not be null");
+
+		final List<CompletableFuture<LinkCorrectionResult>> futures = new ArrayList<>(translatedFiles.size());
+		for (final Map.Entry<Path, String> entry : translatedFiles.entrySet()) {
+			final Path path = entry.getKey();
+			final String content = entry.getValue();
+			futures.add(CompletableFuture.supplyAsync(() -> {
+				try {
+					return correctLinks(path, content);
+				} catch (IOException e) {
+					this.log.error("Failed to correct links in " + path + ": " + e.getMessage());
+					return LinkCorrectionResult.failed(path, content, "IO error: " + e.getMessage());
+				}
+			}, executor));
+		}
+
+		return futures.stream()
+			.map(CompletableFuture::join)
+			.toList();
 	}
 
 	/**

@@ -16,20 +16,20 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Executes translation jobs in parallel using a configurable thread pool.
+ * Executes translation jobs in parallel using a ForkJoinPool.
  * Handles writing successful translations and collecting summary statistics.
+ * The ForkJoinPool enables work-stealing for optimal parallelism.
  */
 public final class TranslationExecutor {
 
 	private static final long SHUTDOWN_TIMEOUT_SECONDS = 60;
 
-	private final ExecutorService executor;
+	private final ForkJoinPool executor;
 	private final Translator translator;
 	private final Writer writer;
 	private final Log log;
@@ -51,7 +51,32 @@ public final class TranslationExecutor {
 	private final AtomicInteger completedJobs = new AtomicInteger(0);
 
 	/**
+	 * Creates a translation executor using an existing ForkJoinPool.
+	 * This constructor allows sharing a pool between Translator and Executor.
+	 *
+	 * @param executor    the ForkJoinPool to use for parallel execution
+	 * @param translator  the translator to use for LLM calls
+	 * @param writer      the writer for output files
+	 * @param log         Maven log for output
+	 * @param sourceDir   the source root directory for relative path calculation
+	 */
+	public TranslationExecutor(
+		@Nonnull ForkJoinPool executor,
+		@Nonnull Translator translator,
+		@Nonnull Writer writer,
+		@Nonnull Log log,
+		@Nonnull Path sourceDir
+	) {
+		this.executor = Objects.requireNonNull(executor, "executor must not be null");
+		this.translator = Objects.requireNonNull(translator, "translator must not be null");
+		this.writer = Objects.requireNonNull(writer, "writer must not be null");
+		this.log = Objects.requireNonNull(log, "log must not be null");
+		this.sourceDir = Objects.requireNonNull(sourceDir, "sourceDir must not be null").toAbsolutePath().normalize();
+	}
+
+	/**
 	 * Creates a translation executor with the specified parallelism.
+	 * Creates a new ForkJoinPool with the given parallelism level.
 	 *
 	 * @param parallelism number of concurrent translations to run
 	 * @param translator  the translator to use for LLM calls
@@ -66,14 +91,27 @@ public final class TranslationExecutor {
 		@Nonnull Log log,
 		@Nonnull Path sourceDir
 	) {
+		this(
+			createPool(parallelism),
+			translator,
+			writer,
+			log,
+			sourceDir
+		);
+	}
+
+	/**
+	 * Creates a ForkJoinPool with the specified parallelism.
+	 *
+	 * @param parallelism number of threads
+	 * @return new ForkJoinPool
+	 */
+	@Nonnull
+	private static ForkJoinPool createPool(int parallelism) {
 		if (parallelism < 1) {
 			throw new IllegalArgumentException("parallelism must be at least 1");
 		}
-		this.executor = Executors.newFixedThreadPool(parallelism);
-		this.translator = Objects.requireNonNull(translator, "translator must not be null");
-		this.writer = Objects.requireNonNull(writer, "writer must not be null");
-		this.log = Objects.requireNonNull(log, "log must not be null");
-		this.sourceDir = Objects.requireNonNull(sourceDir, "sourceDir must not be null").toAbsolutePath().normalize();
+		return new ForkJoinPool(parallelism);
 	}
 
 	/**
@@ -286,5 +324,17 @@ public final class TranslationExecutor {
 	@Nonnull
 	public Map<Path, String> getSuccessfullyTranslatedFiles() {
 		return Map.copyOf(this.successfullyTranslatedFiles);
+	}
+
+	/**
+	 * Returns the ForkJoinPool used by this executor.
+	 * This can be used to submit additional tasks that should share the same parallelism,
+	 * such as link correction after translations complete.
+	 *
+	 * @return the ForkJoinPool used for parallel execution
+	 */
+	@Nonnull
+	public ForkJoinPool getExecutor() {
+		return this.executor;
 	}
 }
