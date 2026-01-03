@@ -3,9 +3,11 @@ package io.evitadb.comenius.model;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -80,10 +82,12 @@ public final class FrontMatterTranslationHelper {
 	/**
 	 * Parses translated field values from LLM response.
 	 * Looks for `[[fieldName]]...[[/fieldName]]` blocks in the response.
+	 * Validates that all expected fields are present in the response.
 	 *
 	 * @param llmResponse    the full LLM response
 	 * @param expectedFields the field names that were sent for translation
 	 * @return map of field name to translated value
+	 * @throws IllegalStateException if any expected fields are missing from response
 	 */
 	@Nonnull
 	public static Map<String, String> parseTranslatedFields(
@@ -105,6 +109,15 @@ public final class FrontMatterTranslationHelper {
 			if (expectedFields.containsKey(fieldName) && !value.isEmpty()) {
 				result.put(fieldName, value);
 			}
+		}
+
+		// Validate all expected fields were received
+		if (result.size() != expectedFields.size()) {
+			final Set<String> missing = new LinkedHashSet<>(expectedFields.keySet());
+			missing.removeAll(result.keySet());
+			throw new IllegalStateException(
+				"Translation incomplete: missing front matter fields: " + missing
+			);
 		}
 
 		return result;

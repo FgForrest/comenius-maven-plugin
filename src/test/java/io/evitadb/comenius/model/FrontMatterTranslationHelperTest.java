@@ -8,6 +8,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -186,6 +187,58 @@ public class FrontMatterTranslationHelperTest {
 		assertEquals(1, result.size());
 		assertEquals("Hallo Welt", result.get("title"));
 		assertFalse(result.containsKey("unexpectedField"));
+	}
+
+	@Test
+	@DisplayName("throws exception when expected field is missing from response")
+	void shouldThrowExceptionWhenFieldMissingFromResponse() {
+		final String llmResponse = """
+			[[title]]
+			Translated Title
+			[[/title]]
+
+			# Content
+			""";
+		// Sent 2 fields, only 1 returned
+		final Map<String, String> expectedFields = Map.of(
+			"title", "Original Title",
+			"perex", "Original Perex"
+		);
+
+		final IllegalStateException exception = assertThrows(
+			IllegalStateException.class,
+			() -> FrontMatterTranslationHelper.parseTranslatedFields(llmResponse, expectedFields)
+		);
+
+		assertTrue(exception.getMessage().contains("perex"));
+		assertTrue(exception.getMessage().contains("missing front matter fields"));
+	}
+
+	@Test
+	@DisplayName("throws exception when field value is empty in response")
+	void shouldThrowExceptionWhenFieldValueEmptyInResponse() {
+		final String llmResponse = """
+			[[title]]
+			Translated Title
+			[[/title]]
+
+			[[perex]]
+
+			[[/perex]]
+
+			# Content
+			""";
+		final Map<String, String> expectedFields = Map.of(
+			"title", "Original Title",
+			"perex", "Original Perex"
+		);
+
+		final IllegalStateException exception = assertThrows(
+			IllegalStateException.class,
+			() -> FrontMatterTranslationHelper.parseTranslatedFields(llmResponse, expectedFields)
+		);
+
+		assertTrue(exception.getMessage().contains("perex"));
 	}
 
 	@Test
