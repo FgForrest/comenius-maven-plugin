@@ -7,14 +7,19 @@ import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.output.TokenUsage;
 import io.evitadb.comenius.llm.PromptLoader;
+import io.evitadb.comenius.model.FrontMatterTranslationHelper;
+import io.evitadb.comenius.model.MarkdownDocument;
+import io.evitadb.comenius.model.PhaseResult;
 import io.evitadb.comenius.model.TranslationJob;
 import io.evitadb.comenius.model.TranslationResult;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -27,6 +32,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * and target locale. Supports both simple text translation and structured TranslationJob-based translation.
  */
 public class Translator {
+
+	private static final String FRONTMATTER_SYSTEM_TEMPLATE = "translate-frontmatter-system.txt";
+	private static final String FRONTMATTER_USER_TEMPLATE = "translate-frontmatter-user.txt";
 
 	private final ChatModel model;
 	private final PromptLoader promptLoader;
@@ -76,8 +84,13 @@ public class Translator {
 	}
 
 	/**
-	 * Translates using a TranslationJob that provides all context and builds prompts polymorphically.
-	 * The job type (new or incremental) determines which prompt templates are used.
+	 * Translates using a TranslationJob with a two-phase approach:
+	 * - Phase 1: Translate front matter fields (if any configured)
+	 * - Phase 2: Translate article body
+	 *
+	 * The phases are chained using CompletableFuture for proper sequencing.
+	 * For incremental jobs, front matter fields are ALWAYS retranslated
+	 * (can't safely detect if changes were in front matter).
 	 *
 	 * @param job the translation job containing source content and metadata
 	 * @return CompletionStage with TranslationResult containing the translated content or error
@@ -86,11 +99,52 @@ public class Translator {
 	public CompletionStage<TranslationResult> translate(@Nonnull TranslationJob job) {
 		Objects.requireNonNull(job, "job must not be null");
 
-		// Build prompts using polymorphism - job knows which templates to use
-		final String systemPrompt = job.buildSystemPrompt(this.promptLoader);
-		final String userPrompt = job.buildUserPrompt(this.promptLoader);
-
 		final Executor effectiveExecutor = this.executor != null ? this.executor : ForkJoinPool.commonPool();
+
+		return CompletableFuture.completedFuture(PhaseResult.initial(job))
+			// Phase 1: Translate front matter (if fields exist)
+			.thenCompose(result -> translateFrontMatter(result, effectiveExecutor))
+			// Phase 2: Translate body
+			.thenCompose(result -> translateBody(result, effectiveExecutor))
+			// Phase 3: Convert to final result
+			.thenApply(PhaseResult::toTranslationResult);
+	}
+
+	/**
+	 * Phase 1: Translates front matter fields.
+	 * For both new and incremental jobs, ALWAYS translates ALL configured fields
+	 * because we cannot safely detect if changes were in front matter.
+	 * Skips this phase if no translatable fields are configured.
+	 *
+	 * @param currentResult the current phase result
+	 * @param executor      the executor for async operations
+	 * @return CompletionStage with updated PhaseResult
+	 */
+	@Nonnull
+	private CompletionStage<PhaseResult> translateFrontMatter(
+		@Nonnull PhaseResult currentResult,
+		@Nonnull Executor executor
+	) {
+		final TranslationJob job = currentResult.job();
+
+		// Extract ALL translatable fields (not just changed ones for incremental)
+		final Map<String, String> fieldsToTranslate = extractAllTranslatableFields(job);
+
+		// Skip phase if no fields to translate
+		if (fieldsToTranslate.isEmpty()) {
+			return CompletableFuture.completedFuture(currentResult);
+		}
+
+		// Build front matter prompts
+		final Map<String, String> placeholders = new HashMap<>(job.getCommonPlaceholders());
+		placeholders.put("frontMatterFields",
+			FrontMatterTranslationHelper.formatFieldsForPrompt(fieldsToTranslate));
+
+		final String systemPrompt = this.promptLoader.loadAndInterpolate(
+			FRONTMATTER_SYSTEM_TEMPLATE, placeholders);
+		final String userPrompt = this.promptLoader.loadAndInterpolate(
+			FRONTMATTER_USER_TEMPLATE, placeholders);
+
 		return CompletableFuture.supplyAsync(() -> {
 			final long startTime = System.currentTimeMillis();
 			try {
@@ -109,14 +163,87 @@ public class Translator {
 				this.inputTokenCount.addAndGet(inputTokens);
 				this.outputTokenCount.addAndGet(outputTokens);
 
-				final String translatedText = response.aiMessage().text();
-				return TranslationResult.success(job, translatedText, inputTokens, outputTokens, elapsedMillis);
+				// Parse translated fields from response
+				final String responseText = response.aiMessage().text();
+				final Map<String, String> translatedFields =
+					FrontMatterTranslationHelper.parseTranslatedFields(responseText, fieldsToTranslate);
+
+				return currentResult.withFrontMatter(translatedFields, inputTokens, outputTokens, elapsedMillis);
 
 			} catch (Exception e) {
 				final long elapsedMillis = System.currentTimeMillis() - startTime;
-				return TranslationResult.failure(job, e.getMessage(), elapsedMillis);
+				return currentResult.withFailure("FRONT_MATTER", e.getMessage(), elapsedMillis);
 			}
-		}, effectiveExecutor);
+		}, executor);
+	}
+
+	/**
+	 * Phase 2: Translates article body.
+	 * Uses the job's polymorphic prompt building (different templates for new vs incremental).
+	 * Skips this phase if Phase 1 failed.
+	 *
+	 * @param currentResult the current phase result
+	 * @param executor      the executor for async operations
+	 * @return CompletionStage with updated PhaseResult
+	 */
+	@Nonnull
+	private CompletionStage<PhaseResult> translateBody(
+		@Nonnull PhaseResult currentResult,
+		@Nonnull Executor executor
+	) {
+		// Skip if previous phase failed
+		if (!currentResult.success()) {
+			return CompletableFuture.completedFuture(currentResult);
+		}
+
+		final TranslationJob job = currentResult.job();
+
+		// Build body-only prompts using polymorphism
+		final String systemPrompt = job.buildSystemPrompt(this.promptLoader);
+		final String userPrompt = job.buildUserPrompt(this.promptLoader);
+
+		return CompletableFuture.supplyAsync(() -> {
+			final long startTime = System.currentTimeMillis();
+			try {
+				final List<ChatMessage> messages = List.of(
+					SystemMessage.from(systemPrompt),
+					UserMessage.from(userPrompt)
+				);
+
+				final ChatResponse response = this.model.chat(messages);
+				final long elapsedMillis = System.currentTimeMillis() - startTime;
+				final TokenUsage tokenUsage = response.tokenUsage();
+
+				final long inputTokens = tokenUsage != null ? tokenUsage.inputTokenCount() : 0;
+				final long outputTokens = tokenUsage != null ? tokenUsage.outputTokenCount() : 0;
+
+				this.inputTokenCount.addAndGet(inputTokens);
+				this.outputTokenCount.addAndGet(outputTokens);
+
+				final String translatedBody = response.aiMessage().text();
+				return currentResult.withBody(translatedBody, inputTokens, outputTokens, elapsedMillis);
+
+			} catch (Exception e) {
+				final long elapsedMillis = System.currentTimeMillis() - startTime;
+				return currentResult.withFailure("BODY", e.getMessage(), elapsedMillis);
+			}
+		}, executor);
+	}
+
+	/**
+	 * Extracts ALL translatable fields from the source document.
+	 * For both new and incremental jobs, this returns all configured fields
+	 * (not just changed ones) because we always retranslate all front matter fields.
+	 *
+	 * @param job the translation job
+	 * @return map of field names to values that should be translated
+	 */
+	@Nonnull
+	private Map<String, String> extractAllTranslatableFields(@Nonnull TranslationJob job) {
+		final MarkdownDocument sourceDoc = new MarkdownDocument(job.getSourceContent());
+		return FrontMatterTranslationHelper.extractTranslatableFields(
+			sourceDoc, job.getTranslatableFrontMatterFields()
+		);
 	}
 
 	/**

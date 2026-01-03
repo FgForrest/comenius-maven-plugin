@@ -54,13 +54,9 @@ public final class TranslateNewJob extends TranslationJob {
 		final Map<String, String> placeholders = new HashMap<>(getCommonPlaceholders());
 
 		// Send only body content (no front matter) to LLM
+		// Front matter fields are translated separately in Phase 1 by Translator
 		final MarkdownDocument sourceDoc = new MarkdownDocument(this.sourceContent);
 		placeholders.put("sourceContent", sourceDoc.getBodyContent());
-
-		// Extract and format front matter fields for translation
-		final Map<String, String> translatableFields = getExtractedTranslatableFields();
-		placeholders.put("frontMatterFields",
-			FrontMatterTranslationHelper.formatFieldsForPrompt(translatableFields));
 
 		return loader.loadAndInterpolate(USER_TEMPLATE, placeholders);
 	}

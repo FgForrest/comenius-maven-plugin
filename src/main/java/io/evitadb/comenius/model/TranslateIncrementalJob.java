@@ -81,16 +81,12 @@ public final class TranslateIncrementalJob extends TranslationJob {
 		final Map<String, String> placeholders = new HashMap<>(getCommonPlaceholders());
 
 		// Send only body content (no front matter) to LLM
+		// Front matter fields are translated separately in Phase 1 by Translator
 		final MarkdownDocument originalDoc = new MarkdownDocument(this.originalSource);
 		final MarkdownDocument existingDoc = new MarkdownDocument(this.existingTranslation);
 		placeholders.put("originalSource", originalDoc.getBodyContent());
 		placeholders.put("existingTranslation", existingDoc.getBodyContent());
 		placeholders.put("diff", this.diff);
-
-		// Extract and format front matter fields for translation (only changed fields)
-		final Map<String, String> translatableFields = getExtractedTranslatableFields();
-		placeholders.put("frontMatterFields",
-			FrontMatterTranslationHelper.formatFieldsForPrompt(translatableFields));
 
 		return loader.loadAndInterpolate(USER_TEMPLATE, placeholders);
 	}

@@ -169,11 +169,13 @@ public sealed abstract class TranslationJob
 
 	/**
 	 * Creates a map of common placeholder values for prompt interpolation.
+	 * Public to allow {@link io.evitadb.comenius.Translator} access
+	 * for building front matter prompts.
 	 *
 	 * @return map of placeholder names to values
 	 */
 	@Nonnull
-	protected Map<String, String> getCommonPlaceholders() {
+	public Map<String, String> getCommonPlaceholders() {
 		return Map.of(
 			"locale", this.locale.getDisplayName(),
 			"localeTag", this.locale.toLanguageTag(),

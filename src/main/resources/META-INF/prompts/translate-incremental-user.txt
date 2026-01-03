@@ -1,5 +1,4 @@
 {{customInstructions}}
-{{frontMatterFields}}
 === ORIGINAL SOURCE DOCUMENT ===
 {{originalSource}}
 
