@@ -49,7 +49,7 @@ public class ComeniusMojoTest {
         // defaults
         assertTrue(log.contains(" - fileRegex: (?i).*\\.md"), "Should show default regex");
         assertTrue(log.contains(" - limit: 2147483647"), "Should show default limit");
-        assertTrue(log.contains(" - dryRun: true"), "Should show dryRun default true");
+        assertTrue(log.contains(" - dryRun: false"), "Should show dryRun default false");
         // warnings for missing LLM settings
         assertTrue(log.contains("LLM url is not set"), "Should warn about missing LLM url");
         assertTrue(log.contains("LLM token is not set"), "Should warn about missing LLM token");
