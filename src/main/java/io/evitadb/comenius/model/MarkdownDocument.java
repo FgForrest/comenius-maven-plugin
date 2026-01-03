@@ -10,6 +10,7 @@ import org.commonmark.node.Node;
 import org.commonmark.parser.Parser;
 
 import javax.annotation.Nonnull;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -110,13 +111,13 @@ public class MarkdownDocument {
 	}
 
 	/**
-	 * Returns all front matter properties as an immutable map.
+	 * Returns all front matter properties as an immutable map preserving insertion order.
 	 *
-	 * @return map of property names to their values
+	 * @return map of property names to their values (ordered by insertion)
 	 */
 	@Nonnull
 	public Map<String, List<String>> getProperties() {
-		return Map.copyOf(this.properties);
+		return Collections.unmodifiableMap(new LinkedHashMap<>(this.properties));
 	}
 
 	/**
