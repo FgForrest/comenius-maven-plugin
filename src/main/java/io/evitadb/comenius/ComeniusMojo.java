@@ -9,6 +9,7 @@ import io.evitadb.comenius.check.LinkCorrectionResult;
 import io.evitadb.comenius.check.LinkError;
 import io.evitadb.comenius.git.GitService;
 import io.evitadb.comenius.llm.ChatModelFactory;
+import io.evitadb.comenius.llm.LlmClient;
 import io.evitadb.comenius.llm.PromptLoader;
 import io.evitadb.comenius.model.MarkdownDocument;
 import io.evitadb.comenius.model.TranslateIncrementalJob;
@@ -240,8 +241,10 @@ public class ComeniusMojo extends AbstractMojo {
 				final ChatModel chatModel = ChatModelFactory.create(
 					this.llmProvider, this.llmUrl, this.llmToken, this.llmModel
 				);
+				// LangChain4j handles retry logic internally
+				final LlmClient llmClient = new LlmClient(chatModel);
 				final PromptLoader promptLoader = new PromptLoader();
-				translator = new Translator(chatModel, promptLoader, translationPool);
+				translator = new Translator(llmClient, promptLoader, translationPool);
 				executor = new TranslationExecutor(translationPool, translator, new Writer(), log, root);
 			}
 

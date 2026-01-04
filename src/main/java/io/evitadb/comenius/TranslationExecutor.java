@@ -1,5 +1,7 @@
 package io.evitadb.comenius;
 
+import dev.langchain4j.exception.NonRetriableException;
+import io.evitadb.comenius.llm.LlmClient;
 import io.evitadb.comenius.model.FrontMatterTranslationHelper;
 import io.evitadb.comenius.model.MarkdownDocument;
 import io.evitadb.comenius.model.TranslationJob;
@@ -8,6 +10,7 @@ import io.evitadb.comenius.model.TranslationSummary;
 import org.apache.maven.plugin.logging.Log;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -16,24 +19,34 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Executes translation jobs in parallel using a ForkJoinPool.
  * Handles writing successful translations and collecting summary statistics.
  * The ForkJoinPool enables work-stealing for optimal parallelism.
+ *
+ * On permanent LLM failures (authentication, quota exceeded), immediately shuts down
+ * the pool to prevent wasting resources on requests that cannot succeed.
  */
 public final class TranslationExecutor {
 
 	private static final long SHUTDOWN_TIMEOUT_SECONDS = 60;
 
+	@Nonnull
 	private final ForkJoinPool executor;
+	@Nonnull
 	private final Translator translator;
+	@Nonnull
 	private final Writer writer;
+	@Nonnull
 	private final Log log;
+	@Nonnull
 	private final Path sourceDir;
 	/**
 	 * Tracks successfully translated files for post-processing (e.g., link correction).
@@ -49,6 +62,16 @@ public final class TranslationExecutor {
 	 */
 	@Nonnull
 	private final AtomicInteger completedJobs = new AtomicInteger(0);
+	/**
+	 * Flag indicating shutdown has been requested due to permanent failure.
+	 */
+	@Nonnull
+	private final AtomicBoolean shutdownRequested = new AtomicBoolean(false);
+	/**
+	 * Stores the cause of permanent failure for reporting.
+	 */
+	@Nullable
+	private volatile NonRetriableException permanentFailureCause = null;
 
 	/**
 	 * Creates a translation executor using an existing ForkJoinPool.
@@ -120,6 +143,9 @@ public final class TranslationExecutor {
 	 * Each result is processed immediately when ready, allowing request/response
 	 * strings to be garbage collected after disk write.
 	 *
+	 * If a permanent LLM failure occurs (authentication, quota exceeded), the pool
+	 * is immediately shut down and remaining jobs are cancelled.
+	 *
 	 * @param jobs the list of translation jobs to execute
 	 * @return summary with success/failure counts and token usage
 	 */
@@ -133,6 +159,8 @@ public final class TranslationExecutor {
 
 		this.totalJobs = jobs.size();
 		this.completedJobs.set(0);
+		this.shutdownRequested.set(false);
+		this.permanentFailureCause = null;
 
 		// Submit all jobs with result processing chained - allows early GC of content
 		final List<CompletableFuture<TranslationSummary>> futures = new ArrayList<>(jobs.size());
@@ -142,26 +170,136 @@ public final class TranslationExecutor {
 				job.getLocale().getDisplayName() + " (" + job.getLocale().toLanguageTag() + ")");
 
 			final CompletableFuture<TranslationSummary> future = this.translator.translate(job)
-				.thenApply(this::processResult)
+				.handle((result, throwable) -> handleTranslationResult(job, result, throwable))
 				.toCompletableFuture();
 			futures.add(future);
 		}
 
-		// Wait for all to complete
-		CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+		// Wait for all to complete (some may complete early due to shutdown)
+		try {
+			CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+		} catch (Exception e) {
+			// If pool was shut down, some futures may throw CancellationException
+			this.log.debug("Some futures did not complete: " + e.getMessage());
+		}
 
 		// Aggregate summaries
 		TranslationSummary summary = TranslationSummary.empty();
 		for (final CompletableFuture<TranslationSummary> future : futures) {
 			try {
-				summary = summary.add(future.get());
+				if (future.isDone() && !future.isCancelled()) {
+					summary = summary.add(future.get());
+				} else {
+					// Job was cancelled due to shutdown
+					summary = summary.withFailure();
+				}
 			} catch (Exception e) {
 				this.log.error("Failed to get translation summary: " + e.getMessage());
 				summary = summary.withFailure();
 			}
 		}
 
+		// Report shutdown status if it occurred
+		if (this.shutdownRequested.get() && this.permanentFailureCause != null) {
+			final int remainingJobs = this.totalJobs - this.completedJobs.get();
+			if (remainingJobs > 0) {
+				this.log.error(remainingJobs + " remaining translations cancelled due to permanent failure");
+			}
+		}
+
 		return summary;
+	}
+
+	/**
+	 * Handles the result of a translation, including exceptions.
+	 * Detects permanent failures and triggers shutdown if needed.
+	 *
+	 * @param job       the translation job
+	 * @param result    the translation result, or null if exception occurred
+	 * @param throwable the exception, or null if successful
+	 * @return summary for this translation
+	 */
+	@Nonnull
+	private TranslationSummary handleTranslationResult(
+		@Nonnull TranslationJob job,
+		@Nullable TranslationResult result,
+		@Nullable Throwable throwable
+	) {
+		if (throwable != null) {
+			// Unwrap CompletionException
+			final Throwable cause = throwable instanceof CompletionException
+				? throwable.getCause() : throwable;
+
+			// Check for permanent failure
+			final NonRetriableException permanent = findPermanentException(cause);
+			if (permanent != null) {
+				handlePermanentFailure(permanent, job);
+				return TranslationSummary.empty().withFailure();
+			}
+
+			// Other exception - just count as failed
+			final Path relativePath = this.sourceDir.relativize(job.getSourceFile());
+			final int completed = this.completedJobs.incrementAndGet();
+			final String progressBar = formatProgressBar(completed, this.totalJobs);
+			this.log.error(progressBar + " [" + job.getType() + "] Translation failed for " +
+				relativePath + ": " + cause.getMessage());
+			return TranslationSummary.empty().withFailure();
+		}
+
+		// No exception - process result normally
+		return processResult(result);
+	}
+
+	/**
+	 * Searches the exception cause chain for a NonRetriableException.
+	 *
+	 * @param throwable the exception to search
+	 * @return the NonRetriableException if found, or null
+	 */
+	@Nullable
+	private NonRetriableException findPermanentException(@Nullable Throwable throwable) {
+		Throwable current = throwable;
+		while (current != null) {
+			if (current instanceof NonRetriableException permanent) {
+				return permanent;
+			}
+			current = current.getCause();
+		}
+		return null;
+	}
+
+	/**
+	 * Handles a permanent LLM failure by shutting down the pool.
+	 * Only the first permanent failure triggers shutdown; subsequent ones are ignored.
+	 *
+	 * @param exception the permanent failure exception
+	 * @param job       the job that caused the failure
+	 */
+	private void handlePermanentFailure(
+		@Nonnull NonRetriableException exception,
+		@Nonnull TranslationJob job
+	) {
+		// Only trigger shutdown once
+		if (this.shutdownRequested.compareAndSet(false, true)) {
+			this.permanentFailureCause = exception;
+
+			this.log.error("");
+			this.log.error("=".repeat(70));
+			this.log.error("PERMANENT LLM ERROR - Shutting down all translations");
+			this.log.error("Error: " + exception.getClass().getSimpleName() + " - " + exception.getMessage());
+			this.log.error("=".repeat(70));
+			this.log.error("");
+
+			// Signal the LLM client to reject new requests
+			final LlmClient llmClient = this.translator.getLlmClient();
+			llmClient.signalShutdown(exception);
+
+			// Shutdown the pool immediately - cancel pending tasks
+			this.executor.shutdownNow();
+		}
+
+		// Count this job as completed/failed
+		this.completedJobs.incrementAndGet();
 	}
 
 	/**
@@ -319,5 +457,24 @@ public final class TranslationExecutor {
 	@Nonnull
 	public ForkJoinPool getExecutor() {
 		return this.executor;
+	}
+
+	/**
+	 * Returns true if a permanent failure triggered shutdown.
+	 *
+	 * @return true if shutdown was requested due to permanent failure
+	 */
+	public boolean wasShutdownDueToPermanentFailure() {
+		return this.shutdownRequested.get() && this.permanentFailureCause != null;
+	}
+
+	/**
+	 * Returns the cause of the permanent failure, if any.
+	 *
+	 * @return the permanent failure exception or null
+	 */
+	@Nullable
+	public NonRetriableException getPermanentFailureCause() {
+		return this.permanentFailureCause;
 	}
 }

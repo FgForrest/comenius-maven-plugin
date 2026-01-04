@@ -5,6 +5,7 @@ import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.output.TokenUsage;
+import io.evitadb.comenius.llm.LlmClient;
 import io.evitadb.comenius.llm.PromptLoader;
 import io.evitadb.comenius.model.TranslateNewJob;
 import io.evitadb.comenius.model.TranslationJob;
@@ -41,7 +42,9 @@ public class TranslationExecutorTest {
 		mockModel = new MockChatModel();
 		writer = new Writer();
 
-		final Translator translator = new Translator(mockModel, new PromptLoader());
+		// LangChain4j handles retry logic internally
+		final LlmClient llmClient = new LlmClient(mockModel);
+		final Translator translator = new Translator(llmClient, new PromptLoader());
 		executor = new TranslationExecutor(4, translator, writer, testLog, sourceDir);
 	}
 

@@ -3,9 +3,11 @@ package io.evitadb.comenius;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.exception.NonRetriableException;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.output.TokenUsage;
+import io.evitadb.comenius.llm.LlmClient;
 import io.evitadb.comenius.llm.PromptLoader;
 import io.evitadb.comenius.model.FrontMatterTranslationHelper;
 import io.evitadb.comenius.model.MarkdownDocument;
@@ -30,13 +32,19 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Translator uses a LangChain4J ChatLanguageModel to translate text according to provided instructions
  * and target locale. Supports both simple text translation and structured TranslationJob-based translation.
+ *
+ * Uses {@link LlmClient} for LLM communication with permanent failure detection.
+ * LangChain4j handles retry logic internally. Non-retriable failures (authentication, quota exceeded)
+ * are propagated to allow immediate shutdown.
  */
 public class Translator {
 
 	private static final String FRONTMATTER_SYSTEM_TEMPLATE = "translate-frontmatter-system.txt";
 	private static final String FRONTMATTER_USER_TEMPLATE = "translate-frontmatter-user.txt";
 
-	private final ChatModel model;
+	@Nonnull
+	private final LlmClient llmClient;
+	@Nonnull
 	private final PromptLoader promptLoader;
 	@Nullable
 	private final Executor executor;
@@ -44,9 +52,38 @@ public class Translator {
 	private final AtomicLong outputTokenCount = new AtomicLong(0);
 
 	/**
-	 * Create a Translator using provided ChatModel, PromptLoader, and Executor.
-	 * The model is expected to perform the actual LLM call; in tests it can be mocked.
+	 * Create a Translator using provided LlmClient, PromptLoader, and Executor.
+	 * The LlmClient handles permanent failure detection.
 	 * The executor is used for async operations; if null, ForkJoinPool.commonPool() is used.
+	 *
+	 * @param llmClient    non-null LLM client to use
+	 * @param promptLoader non-null prompt loader for loading templates
+	 * @param executor     executor for async operations; may be null to use common pool
+	 */
+	public Translator(
+		@Nonnull LlmClient llmClient,
+		@Nonnull PromptLoader promptLoader,
+		@Nullable Executor executor
+	) {
+		this.llmClient = Objects.requireNonNull(llmClient, "llmClient must not be null");
+		this.promptLoader = Objects.requireNonNull(promptLoader, "promptLoader must not be null");
+		this.executor = executor;
+	}
+
+	/**
+	 * Create a Translator using provided LlmClient and PromptLoader.
+	 * Uses ForkJoinPool.commonPool() for async operations.
+	 *
+	 * @param llmClient    non-null LLM client to use
+	 * @param promptLoader non-null prompt loader for loading templates
+	 */
+	public Translator(@Nonnull LlmClient llmClient, @Nonnull PromptLoader promptLoader) {
+		this(llmClient, promptLoader, null);
+	}
+
+	/**
+	 * Create a Translator using provided ChatModel, PromptLoader, and Executor.
+	 * Wraps the ChatModel in an LlmClient.
 	 *
 	 * @param model        non-null chat model to use
 	 * @param promptLoader non-null prompt loader for loading templates
@@ -57,30 +94,41 @@ public class Translator {
 		@Nonnull PromptLoader promptLoader,
 		@Nullable Executor executor
 	) {
-		this.model = Objects.requireNonNull(model, "model must not be null");
-		this.promptLoader = Objects.requireNonNull(promptLoader, "promptLoader must not be null");
-		this.executor = executor;
+		this(new LlmClient(model), promptLoader, executor);
 	}
 
 	/**
-	 * Create a Translator using provided ChatLanguageModel and PromptLoader.
+	 * Create a Translator using provided ChatModel and PromptLoader.
+	 * Wraps the ChatModel in an LlmClient.
 	 * Uses ForkJoinPool.commonPool() for async operations.
 	 *
 	 * @param model        non-null chat model to use
 	 * @param promptLoader non-null prompt loader for loading templates
 	 */
 	public Translator(@Nonnull ChatModel model, @Nonnull PromptLoader promptLoader) {
-		this(model, promptLoader, null);
+		this(new LlmClient(model), promptLoader, null);
 	}
 
 	/**
 	 * Create a Translator using provided ChatModel with a default PromptLoader.
+	 * Wraps the ChatModel in an LlmClient.
 	 * Uses ForkJoinPool.commonPool() for async operations.
 	 *
 	 * @param model non-null chat model to use
 	 */
 	public Translator(@Nonnull ChatModel model) {
-		this(model, new PromptLoader(), null);
+		this(new LlmClient(model), new PromptLoader(), null);
+	}
+
+	/**
+	 * Returns the LlmClient used by this translator.
+	 * Useful for checking permanent failure status.
+	 *
+	 * @return the LLM client
+	 */
+	@Nonnull
+	public LlmClient getLlmClient() {
+		return this.llmClient;
 	}
 
 	/**
@@ -153,7 +201,7 @@ public class Translator {
 					UserMessage.from(userPrompt)
 				);
 
-				final ChatResponse response = this.model.chat(messages);
+				final ChatResponse response = this.llmClient.chat(messages);
 				final long elapsedMillis = System.currentTimeMillis() - startTime;
 				final TokenUsage tokenUsage = response.tokenUsage();
 
@@ -170,7 +218,11 @@ public class Translator {
 
 				return currentResult.withFrontMatter(translatedFields, inputTokens, outputTokens, elapsedMillis);
 
+			} catch (NonRetriableException e) {
+				// Propagate permanent failures for executor to handle shutdown
+				throw e;
 			} catch (Exception e) {
+				// Transient failures - mark as failed
 				final long elapsedMillis = System.currentTimeMillis() - startTime;
 				return currentResult.withFailure("FRONT_MATTER", e.getMessage(), elapsedMillis);
 			}
@@ -210,7 +262,7 @@ public class Translator {
 					UserMessage.from(userPrompt)
 				);
 
-				final ChatResponse response = this.model.chat(messages);
+				final ChatResponse response = this.llmClient.chat(messages);
 				final long elapsedMillis = System.currentTimeMillis() - startTime;
 				final TokenUsage tokenUsage = response.tokenUsage();
 
@@ -223,7 +275,11 @@ public class Translator {
 				final String translatedBody = response.aiMessage().text();
 				return currentResult.withBody(translatedBody, inputTokens, outputTokens, elapsedMillis);
 
+			} catch (NonRetriableException e) {
+				// Propagate permanent failures for executor to handle shutdown
+				throw e;
 			} catch (Exception e) {
+				// Transient failures - mark as failed
 				final long elapsedMillis = System.currentTimeMillis() - startTime;
 				return currentResult.withFailure("BODY", e.getMessage(), elapsedMillis);
 			}
@@ -282,7 +338,7 @@ public class Translator {
 		// Offload to a separate thread as a minimal async behavior; in real usage, model may block
 		final Executor effectiveExecutor = this.executor != null ? this.executor : ForkJoinPool.commonPool();
 		return CompletableFuture.supplyAsync(() -> {
-			final ChatResponse response = this.model.chat(messages);
+			final ChatResponse response = this.llmClient.chat(messages);
 			final TokenUsage tokenUsage = response.tokenUsage();
 			if (tokenUsage != null) {
 				this.inputTokenCount.addAndGet(tokenUsage.inputTokenCount());
