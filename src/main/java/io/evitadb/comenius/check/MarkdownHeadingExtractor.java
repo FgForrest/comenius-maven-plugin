@@ -61,13 +61,15 @@ public final class MarkdownHeadingExtractor extends AbstractVisitor {
 	/**
 	 * Converts heading text to a URL-safe anchor slug.
 	 * Follows GitHub-style anchor generation:
-	 * - Convert to lowercase
-	 * - Remove special characters (keep alphanumeric, spaces, hyphens)
+	 * - Convert to lowercase (including Unicode characters)
+	 * - Remove special characters (keep Unicode letters, digits, spaces, hyphens)
 	 * - Replace spaces with hyphens (each space becomes one hyphen)
 	 * - Trim leading/trailing hyphens
 	 *
 	 * Note: Multiple consecutive hyphens are preserved (e.g., "Open / remap" becomes "open--remap"
 	 * because the slash is removed leaving two spaces which become two hyphens).
+	 *
+	 * GitHub preserves national/Unicode characters in anchors (e.g., "struktura-záznamu-v-úložišti").
 	 *
 	 * @param text the heading text to slugify
 	 * @return URL-safe anchor slug
@@ -75,7 +77,7 @@ public final class MarkdownHeadingExtractor extends AbstractVisitor {
 	@Nonnull
 	static String slugify(@Nonnull String text) {
 		return text.toLowerCase()
-			.replaceAll("[^a-z0-9\\s-]", "")
+			.replaceAll("[^\\p{L}\\p{N}\\s-]", "")
 			.replaceAll("\\s", "-")
 			.replaceAll("^-+|-+$", "");
 	}

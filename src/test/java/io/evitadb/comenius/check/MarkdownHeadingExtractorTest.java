@@ -167,4 +167,32 @@ public class MarkdownHeadingExtractorTest {
 		assertEquals(1, anchors.size());
 		assertTrue(anchors.contains("bold-and-italic-heading"));
 	}
+
+	@Test
+	@DisplayName("preserves national/Unicode characters in anchors (GitHub style)")
+	public void shouldPreserveNationalCharactersInAnchors() {
+		// Czech text with diacritics
+		final String markdown = "# Struktura záznamu v úložišti";
+		final MarkdownDocument doc = new MarkdownDocument(markdown);
+		final Set<String> anchors = MarkdownHeadingExtractor.extractAnchors(doc.getDocument());
+
+		assertEquals(1, anchors.size());
+		assertTrue(anchors.contains("struktura-záznamu-v-úložišti"));
+	}
+
+	@Test
+	@DisplayName("slugify preserves various national characters")
+	public void shouldSlugifyPreserveNationalCharacters() {
+		// Czech
+		assertEquals("struktura-záznamu-v-úložišti", MarkdownHeadingExtractor.slugify("Struktura záznamu v úložišti"));
+		assertEquals("přehled-entit", MarkdownHeadingExtractor.slugify("Přehled entit"));
+		// German
+		assertEquals("größe-und-länge", MarkdownHeadingExtractor.slugify("Größe und Länge"));
+		// French
+		assertEquals("déjà-vu", MarkdownHeadingExtractor.slugify("Déjà vu"));
+		// Spanish
+		assertEquals("año-nuevo", MarkdownHeadingExtractor.slugify("Año Nuevo"));
+		// Polish
+		assertEquals("żółć", MarkdownHeadingExtractor.slugify("Żółć"));
+	}
 }
