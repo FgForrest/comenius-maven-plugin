@@ -50,13 +50,14 @@ Add the plugin to your `pom.xml`:
 
 ## Available Actions
 
-The plugin provides three actions via the `comenius.action` parameter:
+The plugin provides four actions via the `comenius.action` parameter:
 
 | Action        | Description                                           |
 |---------------|-------------------------------------------------------|
 | `show-config` | Displays current plugin configuration (default)       |
 | `check`       | Validates files - checks Git status and link validity |
 | `translate`   | Executes the translation workflow                     |
+| `fix-links`   | Corrects links in all translated files                |
 
 ## Configuration Parameters
 
@@ -331,6 +332,52 @@ Note that:
 
 When using incremental translation mode, only front matter fields that have **changed** in the source file are
 re-translated. Unchanged fields preserve their existing translations.
+
+## Fixing Links in Translated Files
+
+The `fix-links` action corrects links in all translated files without performing new translations. This is useful for:
+
+- Fixing links after manual edits to translated files
+- Re-running link correction after source file structure changes
+- Batch-correcting links across all target directories
+
+### Running the Fix-Links Action
+
+```bash
+mvn comenius:run -Dcomenius.action=fix-links
+```
+
+### What Gets Corrected
+
+1. **Asset links** - Relative paths to images, PDFs, and other assets are recalculated from the target directory to the source assets
+2. **Anchor links** - Internal anchors (e.g., `#section-title`) are translated by mapping heading positions between source and translated documents
+3. **Front matter links** - Links in translatable front matter fields are also corrected
+
+### Required Parameters
+
+The `fix-links` action requires:
+- `sourceDir` - The source directory containing original files (used for anchor mapping)
+- `targets` - List of target directories to process
+
+### Example
+
+```bash
+mvn comenius:run \
+  -Dcomenius.action=fix-links \
+  -Dcomenius.sourceDir=docs/en
+```
+
+The action will process all target directories configured in your `pom.xml` and:
+1. Find all markdown files matching the `fileRegex` pattern in each target directory
+2. For each file, locate the corresponding source file at the same relative path in `sourceDir`
+3. Correct asset links (recalculate paths from target to source assets)
+4. Correct anchor links (map heading positions from source to translated document)
+5. Write corrected files back to disk
+6. Validate all links after correction
+
+**Note:** Each file in the target directory must have a corresponding source file at the same
+relative path. For example, if processing `docs/de/guide/intro.md`, the source file
+`docs/en/guide/intro.md` must exist for anchor correction to work correctly.
 
 ## Excluding Directories and Files
 

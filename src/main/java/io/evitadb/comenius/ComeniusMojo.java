@@ -114,8 +114,11 @@ public class ComeniusMojo extends AbstractMojo {
 			case "check":
 				check(getLog());
 				break;
+			case "fix-links":
+				fixLinks(getLog());
+				break;
 			default:
-				throw new MojoExecutionException("Unknown action: " + this.action + ". Supported actions: show-config, translate, check");
+				throw new MojoExecutionException("Unknown action: " + this.action + ". Supported actions: show-config, translate, check, fix-links");
 		}
 	}
 
@@ -423,6 +426,150 @@ public class ComeniusMojo extends AbstractMojo {
 
 		} catch (final IOException ex) {
 			throw new MojoExecutionException("Check action failed: " + ex.getMessage(), ex);
+		}
+	}
+
+	/**
+	 * Executes the fix-links action to correct links in all translated files.
+	 * This action runs only the link correction phase without performing translations.
+	 *
+	 * @param log the Maven log
+	 * @throws MojoExecutionException if the action fails
+	 */
+	private void fixLinks(@Nonnull final Log log) throws MojoExecutionException {
+		// Validate required parameters
+		if (this.sourceDir == null || this.sourceDir.isBlank()) {
+			log.error("Source directory must be specified for fix-links action");
+			throw new MojoExecutionException("Source directory not specified");
+		}
+		if (this.targets == null || this.targets.isEmpty()) {
+			log.error("At least one target must be specified for fix-links action");
+			throw new MojoExecutionException("No targets specified");
+		}
+
+		try {
+			final Path root = Path.of(this.sourceDir).toAbsolutePath().normalize();
+			if (!Files.exists(root) || !Files.isDirectory(root)) {
+				log.error("Source directory does not exist or is not a directory: " + root);
+				throw new MojoExecutionException("Invalid source directory: " + root);
+			}
+			final Pattern pattern = Pattern.compile(this.fileRegex);
+
+			// Find git repository root
+			final Path gitRoot = findGitRoot(root);
+			final GitService gitService = new GitService(gitRoot);
+
+			// Create shared ForkJoinPool for parallel work
+			final ForkJoinPool pool = new ForkJoinPool(this.parallelism);
+
+			try {
+				// Process each target
+				for (final Target target : this.targets) {
+					if (target == null || target.getLocale() == null || target.getTargetDir() == null) {
+						log.warn("Skipping incomplete target configuration");
+						continue;
+					}
+
+					final Locale locale = Locale.forLanguageTag(target.getLocale());
+					final Path targetDir = Path.of(target.getTargetDir()).toAbsolutePath().normalize();
+
+					if (!Files.exists(targetDir) || !Files.isDirectory(targetDir)) {
+						log.warn("Target directory does not exist, skipping: " + targetDir);
+						continue;
+					}
+
+					log.info("=== Fixing links for: " + locale.getDisplayName() + " (" + locale.toLanguageTag() + ") in " + targetDir + " ===");
+
+					// Collect all files in target directory
+					final List<Pattern> exclusionPatterns = compileExclusionPatterns(this.excludedFilePatterns);
+					final Map<Path, String> filesToProcess = new HashMap<>();
+					final Visitor collectingVisitor = (file, content, instructions) -> {
+						filesToProcess.put(file, content);
+					};
+
+					final Traverser traverser = new Traverser(targetDir, pattern, exclusionPatterns, collectingVisitor);
+					traverser.traverse();
+
+					log.info("Found " + filesToProcess.size() + " files to process");
+
+					if (filesToProcess.isEmpty()) {
+						continue;
+					}
+
+					// Run link correction
+					final LinkCorrector corrector = new LinkCorrector(
+						root, targetDir, pattern, exclusionPatterns,
+						this.translatableFrontMatterFields, log
+					);
+
+					final List<LinkCorrectionResult> results = corrector.correctAllParallel(filesToProcess, pool);
+
+					// Write corrected files and collect statistics
+					final Writer writer = new Writer();
+					int totalCorrections = 0;
+					int filesWithCorrections = 0;
+					int correctionErrors = 0;
+
+					for (final LinkCorrectionResult result : results) {
+						if (!result.isSuccess()) {
+							correctionErrors++;
+							for (final String error : result.errors()) {
+								log.error("Link correction error in " + result.targetFile() + ": " + error);
+							}
+							continue;
+						}
+
+						if (result.totalCorrections() > 0) {
+							try {
+								final MarkdownDocument doc = new MarkdownDocument(result.correctedContent());
+								writer.write(doc, result.targetFile());
+								filesWithCorrections++;
+								totalCorrections += result.totalCorrections();
+								log.debug("Corrected " + result.totalCorrections() + " links in " +
+									result.targetFile().getFileName());
+							} catch (IOException e) {
+								log.error("Failed to write corrected file " + result.targetFile() + ": " + e.getMessage());
+								correctionErrors++;
+							}
+						}
+					}
+
+					log.info("Link corrections: " + totalCorrections + " in " + filesWithCorrections + " files");
+					if (correctionErrors > 0) {
+						log.error("Link correction errors: " + correctionErrors);
+					}
+
+					// Validation phase
+					log.info("--- Link Validation Phase ---");
+					final ContentChecker checker = new ContentChecker(gitService, targetDir, gitRoot);
+					int validatedCount = 0;
+
+					for (final LinkCorrectionResult result : results) {
+						if (result.isSuccess()) {
+							checker.checkFile(result.targetFile(), result.correctedContent());
+							validatedCount++;
+						}
+					}
+
+					final CheckResult checkResult = checker.getResult();
+
+					if (!checkResult.linkErrors().isEmpty()) {
+						log.error("Post-correction link validation errors: " + checkResult.linkErrors().size());
+						for (final LinkError error : checkResult.linkErrors()) {
+							final Path relativePath = targetDir.relativize(error.sourceFile());
+							log.error("  " + relativePath + ": " + error.linkDestination() +
+								" (" + error.type() + ")");
+						}
+					} else {
+						log.info("Validated " + validatedCount + " files - all links OK");
+					}
+				}
+			} finally {
+				pool.shutdown();
+			}
+
+		} catch (final IOException ex) {
+			throw new MojoExecutionException("Fix-links action failed: " + ex.getMessage(), ex);
 		}
 	}
 
