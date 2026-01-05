@@ -67,7 +67,16 @@ public class TranslatorTest {
 	@Test
 	@DisplayName("shouldTranslateIncrementalJobSuccessfully")
 	void shouldTranslateIncrementalJobSuccessfully() throws Exception {
-		mockModel.setResponse("# Aktualisierter Inhalt", 200, 100);
+		// For incremental jobs, the LLM returns a unified diff that transforms
+		// the existing translation body to the new translation
+		final String diffResponse = """
+			--- a/translation
+			+++ b/translation
+			@@ -1 +1 @@
+			-# Urspruenglicher Inhalt
+			+# Aktualisierter Inhalt
+			""";
+		mockModel.setResponse(diffResponse, 200, 100);
 
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
 			Path.of("/source/doc.md"),
@@ -378,7 +387,15 @@ public class TranslatorTest {
 	void shouldAlwaysTranslateAllFrontMatterFieldsForIncrementalJob() throws Exception {
 		// Front matter response should contain ALL fields, not just changed ones
 		mockModel.addResponse("[[title]]\nNeuer Titel\n[[/title]]\n[[perex]]\nBeschreibung\n[[/perex]]", 80, 40);
-		mockModel.addResponse("# Aktualisierter Inhalt", 120, 60);
+		// For incremental jobs, the body LLM response is a unified diff
+		final String diffResponse = """
+			--- a/translation
+			+++ b/translation
+			@@ -1 +1 @@
+			-# Urspruenglicher Inhalt
+			+# Aktualisierter Inhalt
+			""";
+		mockModel.addResponse(diffResponse, 120, 60);
 
 		// Create incremental job where only title changed
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
@@ -406,6 +423,147 @@ public class TranslatorTest {
 		final String content = result.translatedContent();
 		assertTrue(content.contains("[[title]]"));
 		assertTrue(content.contains("[[perex]]"));
+	}
+
+	// ============== Diff-Based Incremental Translation Tests ==============
+
+	@Test
+	@DisplayName("shouldHandleEmptyDiffResponseCorrectly")
+	void shouldHandleEmptyDiffResponseCorrectly() throws Exception {
+		// Empty diff means no changes needed - return existing translation
+		mockModel.setResponse("", 100, 10);
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			"# Same Content",
+			"def456",
+			null,
+			null,
+			"# Same Content",
+			"# Gleicher Inhalt",
+			"",  // No diff
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertTrue(result.success());
+		assertEquals("# Gleicher Inhalt", result.translatedContent());
+	}
+
+	@Test
+	@DisplayName("shouldRetryWithCorrectionPromptOnInvalidDiff")
+	void shouldRetryWithCorrectionPromptOnInvalidDiff() throws Exception {
+		// First response is invalid diff
+		mockModel.addResponse("This is not a valid diff", 100, 50);
+		// Second response (retry) is valid diff
+		final String validDiff = """
+			--- a/translation
+			+++ b/translation
+			@@ -1 +1 @@
+			-# Urspruenglicher Inhalt
+			+# Korrigierter Inhalt
+			""";
+		mockModel.addResponse(validDiff, 150, 75);
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			"# Fixed Content",
+			"def456",
+			null,
+			null,
+			"# Original Content",
+			"# Urspruenglicher Inhalt",
+			"@@ -1 +1 @@\n-Original\n+Fixed",
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertTrue(result.success());
+		// Should have made 2 calls (initial + retry)
+		assertEquals(2, mockModel.getCallCount());
+		assertEquals("# Korrigierter Inhalt", result.translatedContent());
+		// Token counts should include both attempts
+		assertEquals(250, result.inputTokens());
+		assertEquals(125, result.outputTokens());
+	}
+
+	@Test
+	@DisplayName("shouldFailJobAfterSecondInvalidDiff")
+	void shouldFailJobAfterSecondInvalidDiff() throws Exception {
+		// Both attempts return invalid diffs
+		mockModel.addResponse("Invalid diff 1", 100, 50);
+		mockModel.addResponse("Invalid diff 2", 100, 50);
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			"# Updated Content",
+			"def456",
+			null,
+			null,
+			"# Original Content",
+			"# Urspruenglicher Inhalt",
+			"@@ -1 +1 @@\n-Original\n+Updated",
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertFalse(result.success());
+		// Should have made 2 calls (initial + retry)
+		assertEquals(2, mockModel.getCallCount());
+		assertTrue(result.errorMessage().contains("BODY_DIFF"));
+		assertTrue(result.errorMessage().contains("failed after retry"));
+	}
+
+	@Test
+	@DisplayName("shouldApplyValidDiffToExistingTranslation")
+	void shouldApplyValidDiffToExistingTranslation() throws Exception {
+		// Multi-line diff example
+		final String validDiff = """
+			--- a/translation
+			+++ b/translation
+			@@ -1,3 +1,3 @@
+			 # Titel
+
+			-Alter Absatz.
+			+Neuer Absatz mit mehr Text.
+			""";
+		mockModel.setResponse(validDiff, 200, 100);
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			"# Title\n\nNew paragraph with more text.",
+			"def456",
+			null,
+			null,
+			"# Title\n\nOld paragraph.",
+			"# Titel\n\nAlter Absatz.",
+			"@@ -3 +3 @@\n-Old paragraph.\n+New paragraph with more text.",
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertTrue(result.success());
+		assertEquals("# Titel\n\nNeuer Absatz mit mehr Text.", result.translatedContent());
 	}
 
 	/**

@@ -13,6 +13,8 @@ while preserving formatting and structure.
 - **Parallel Processing**: Configurable parallelism for faster batch translations
 - **Dry Run Mode**: Preview what would be translated without making changes
 - **Custom Instructions**: Per-directory translation instructions via `.comenius-instructions` files
+- **Large Document Splitting**: Automatically splits documents exceeding 32kB at heading boundaries for translation
+- **Diff-Based Updates**: Incremental translations use unified diff format to minimize token usage
 
 ## Quick Start
 
@@ -475,6 +477,97 @@ After a translation run, the plugin reports:
 7. **Monitor token usage**: Track input/output tokens to manage API costs.
 
 8. **Use appropriate parallelism**: Adjust `-Dcomenius.parallelism` based on your API rate limits.
+
+## Large Document Handling
+
+For documents exceeding 32kB, the plugin automatically splits them into smaller chunks based on heading structure
+and translates each chunk separately. This prevents LLM context window limitations and improves translation quality.
+
+### Splitting Algorithm
+
+- **Target chunk size**: 32kB (+/- 20% tolerance, i.e., 25.6kB - 38.4kB per chunk)
+- **Heading preference**: H1 > H2 > H3 > H4 > H5 > H6 (higher-level headings are preferred split points)
+- **Sequential translation**: Chunks are translated one at a time to maintain consistency and respect rate limits
+
+The algorithm prefers splitting at higher-level headings (H1, H2) to maintain logical document sections. If no
+suitable heading exists within the acceptable size range, it will split at the next available heading.
+
+### Behavior
+
+- Documents under 32kB are translated as a single unit (unchanged behavior)
+- Documents over 32kB are automatically split at heading boundaries
+- Translated chunks are rejoined in original order
+- If any chunk fails, the entire document translation fails
+- Content before the first heading (intro content) may become its own chunk if large enough
+
+### Example
+
+A 100kB document with this structure:
+
+```markdown
+# Introduction
+(content)
+
+# Getting Started
+(content)
+
+## Installation
+(content)
+
+## Configuration
+(content)
+
+# Advanced Topics
+(content)
+```
+
+Would be split preferentially at H1 headings (`# Introduction`, `# Getting Started`, `# Advanced Topics`),
+resulting in approximately 3 chunks that are each translated separately.
+
+## Incremental Translation (Diff-Based)
+
+When updating existing translations, the plugin uses a diff-based approach to minimize token usage and
+improve accuracy:
+
+1. The LLM receives the existing translation and source changes (unified diff)
+2. The LLM returns a unified diff describing changes to the translation
+3. The diff is applied to the existing translation
+
+### Benefits
+
+- **Reduced token usage**: Only changes are sent and received, not the entire document
+- **Faster updates**: Smaller payloads mean faster API responses
+- **Better accuracy**: The LLM focuses only on changed content, reducing context confusion
+
+### Diff Format
+
+The LLM produces standard unified diff format:
+
+```diff
+--- a/translation
++++ b/translation
+@@ -5,7 +5,7 @@
+ Some context line
+ Another context line
+-Old translated text
++New translated text
+ More context
+```
+
+### Error Handling
+
+If the LLM produces an invalid diff:
+
+1. The plugin retries with a correction prompt showing the invalid output
+2. If the second attempt also fails, the translation job is marked as failed
+
+**Note**: Unlike full translation failures, diff failures do **not** automatically fall back to complete
+retranslation. This ensures you're aware of potential issues that may require manual intervention.
+
+### Empty Changes
+
+If the source changes don't require any translation updates (e.g., only code formatting changed), the LLM
+may return an empty diff. In this case, the existing translation is preserved unchanged.
 
 ## Troubleshooting
 

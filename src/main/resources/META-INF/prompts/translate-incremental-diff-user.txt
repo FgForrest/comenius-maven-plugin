@@ -1,0 +1,9 @@
+{{customInstructions}}
+=== EXISTING TRANSLATION ===
+{{existingTranslation}}
+
+=== SOURCE CHANGES (UNIFIED DIFF) ===
+{{diff}}
+
+=== YOUR TASK ===
+Produce a unified git diff for translated part. Output ONLY the diff, no explanation.

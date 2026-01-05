@@ -14,12 +14,15 @@ import java.util.Objects;
 
 /**
  * Translation job for updating existing translations based on source file changes.
- * Uses incremental translation prompts that include the original source, existing translation, and diff.
+ * Uses diff-based incremental translation: the LLM receives the existing translation and source diff,
+ * and returns a unified diff that is applied to the existing translation.
+ * This approach reduces token usage by only sending/receiving changes.
  */
 public final class TranslateIncrementalJob extends TranslationJob {
 
-	private static final String SYSTEM_TEMPLATE = "translate-incremental-system.txt";
-	private static final String USER_TEMPLATE = "translate-incremental-user.txt";
+	private static final String SYSTEM_TEMPLATE = "translate-incremental-diff-system.txt";
+	private static final String USER_TEMPLATE = "translate-incremental-diff-user.txt";
+	private static final String RETRY_TEMPLATE = "translate-incremental-diff-retry.txt";
 
 	@Nonnull
 	private final String originalSource;
@@ -82,13 +85,43 @@ public final class TranslateIncrementalJob extends TranslationJob {
 
 		// Send only body content (no front matter) to LLM
 		// Front matter fields are translated separately in Phase 1 by Translator
-		final MarkdownDocument originalDoc = new MarkdownDocument(this.originalSource);
 		final MarkdownDocument existingDoc = new MarkdownDocument(this.existingTranslation);
-		placeholders.put("originalSource", originalDoc.getBodyContent());
 		placeholders.put("existingTranslation", existingDoc.getBodyContent());
 		placeholders.put("diff", this.diff);
 
 		return loader.loadAndInterpolate(USER_TEMPLATE, placeholders);
+	}
+
+	/**
+	 * Builds the retry prompt for when the LLM produces an invalid diff.
+	 * Includes the invalid response and asks for a corrected diff.
+	 *
+	 * @param loader          the prompt loader
+	 * @param invalidResponse the invalid diff response from the LLM
+	 * @return the retry prompt string
+	 */
+	@Nonnull
+	public String buildRetryPrompt(@Nonnull PromptLoader loader, @Nonnull String invalidResponse) {
+		final Map<String, String> placeholders = new HashMap<>(getCommonPlaceholders());
+
+		final MarkdownDocument existingDoc = new MarkdownDocument(this.existingTranslation);
+		placeholders.put("existingTranslation", existingDoc.getBodyContent());
+		placeholders.put("diff", this.diff);
+		placeholders.put("invalidResponse", invalidResponse);
+
+		return loader.loadAndInterpolate(RETRY_TEMPLATE, placeholders);
+	}
+
+	/**
+	 * Returns the body content of the existing translation (without front matter).
+	 * Used by Translator to apply diff to the existing translation body.
+	 *
+	 * @return the existing translation body content
+	 */
+	@Nonnull
+	public String getExistingTranslationBody() {
+		final MarkdownDocument existingDoc = new MarkdownDocument(this.existingTranslation);
+		return existingDoc.getBodyContent();
 	}
 
 	@Override

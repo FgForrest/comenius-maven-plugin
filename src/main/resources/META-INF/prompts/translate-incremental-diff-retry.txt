@@ -1,0 +1,23 @@
+Your previous response was not a valid unified diff format.
+
+=== YOUR INVALID RESPONSE ===
+{{invalidResponse}}
+
+=== ORIGINAL REQUEST ===
+Translate changes to {{locale}} ({{localeTag}}).
+
+Source changes:
+{{diff}}
+
+Existing translation to update:
+{{existingTranslation}}
+
+=== REQUIREMENTS ===
+Please produce a VALID unified diff. Remember:
+- Start with --- a/translation and +++ b/translation
+- Use @@ -line,count +line,count @@ for hunk headers
+- Use - for removed lines, + for added lines, space for context
+- Include 3 lines of context around each change
+- Output ONLY the diff, nothing else
+
+If there are no changes needed, output an empty response.

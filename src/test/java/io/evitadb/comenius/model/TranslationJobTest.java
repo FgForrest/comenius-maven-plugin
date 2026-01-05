@@ -80,7 +80,7 @@ public class TranslationJobTest {
 		final String userPrompt = job.buildUserPrompt(promptLoader);
 
 		assertNotNull(userPrompt);
-		assertTrue(userPrompt.contains(originalSource), "Should contain original source");
+		// Diff-based incremental prompts include existing translation and diff, but not original source
 		assertTrue(userPrompt.contains(existingTranslation), "Should contain existing translation");
 		assertTrue(userPrompt.contains(diff), "Should contain diff");
 	}
