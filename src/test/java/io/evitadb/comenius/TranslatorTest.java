@@ -65,30 +65,22 @@ public class TranslatorTest {
 	}
 
 	@Test
-	@DisplayName("shouldTranslateIncrementalJobSuccessfully")
-	void shouldTranslateIncrementalJobSuccessfully() throws Exception {
-		// For incremental jobs, the LLM returns a unified diff that transforms
-		// the existing translation body to the new translation
-		final String diffResponse = """
-			--- a/translation
-			+++ b/translation
-			@@ -1 +1 @@
-			-# Urspruenglicher Inhalt
-			+# Aktualisierter Inhalt
-			""";
-		mockModel.setResponse(diffResponse, 200, 100);
+	@DisplayName("shouldTranslateIncrementalJobWithSectionApproach")
+	void shouldTranslateIncrementalJobWithSectionApproach() throws Exception {
+		// Section-based: only the changed section is translated
+		// The LLM returns the translated section content
+		mockModel.setResponse("# Aktualisierter Inhalt\n\nNeuer Text hier.", 200, 100);
 
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
 			Path.of("/source/doc.md"),
 			Path.of("/target/de/doc.md"),
 			Locale.GERMAN,
-			"# Updated Content",
+			"# Updated Content\n\nNew text here.",       // current source
 			"def456",
 			null,
 			null,
-			"# Original Content",
-			"# Urspruenglicher Inhalt",
-			"@@ -1 +1 @@\n-Original\n+Updated",
+			"# Original Content\n\nOld text here.",       // original source
+			"# Urspruenglicher Inhalt\n\nAlter Text hier.", // existing translation
 			"abc123",
 			2
 		);
@@ -97,7 +89,42 @@ public class TranslatorTest {
 		final TranslationResult result = stage.toCompletableFuture().get();
 
 		assertTrue(result.success());
-		assertEquals("# Aktualisierter Inhalt", result.translatedContent());
+		assertNotNull(result.translatedContent());
+	}
+
+	@Test
+	@DisplayName("shouldPreserveUnchangedSectionsInIncrementalTranslation")
+	void shouldPreserveUnchangedSectionsInIncrementalTranslation() throws Exception {
+		// Two sections: first unchanged, second modified
+		// Only the modified section should trigger LLM call
+		mockModel.setResponse("## Neuer Abschnitt\n\nUebersetzter neuer Text.", 200, 100);
+
+		final String oldSource = "# Title\n\nIntro text.\n\n## Section One\n\nOriginal content.";
+		final String newSource = "# Title\n\nIntro text.\n\n## Section Two\n\nNew content.";
+		final String existingTranslation = "# Titel\n\nEinfuehrungstext.\n\n## Abschnitt Eins\n\nUrspruenglicher Inhalt.";
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			newSource,
+			"def456",
+			null,
+			null,
+			oldSource,
+			existingTranslation,
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertTrue(result.success());
+		// The unchanged intro section should be preserved verbatim
+		final String content = result.translatedContent();
+		assertTrue(content.contains("# Titel"), "Unchanged section should be preserved");
+		assertTrue(content.contains("Einfuehrungstext"), "Unchanged intro content should be preserved");
 	}
 
 	@Test
@@ -387,15 +414,8 @@ public class TranslatorTest {
 	void shouldAlwaysTranslateAllFrontMatterFieldsForIncrementalJob() throws Exception {
 		// Front matter response should contain ALL fields, not just changed ones
 		mockModel.addResponse("[[title]]\nNeuer Titel\n[[/title]]\n[[perex]]\nBeschreibung\n[[/perex]]", 80, 40);
-		// For incremental jobs, the body LLM response is a unified diff
-		final String diffResponse = """
-			--- a/translation
-			+++ b/translation
-			@@ -1 +1 @@
-			-# Urspruenglicher Inhalt
-			+# Aktualisierter Inhalt
-			""";
-		mockModel.addResponse(diffResponse, 120, 60);
+		// Section-based body translation returns translated section
+		mockModel.addResponse("# Aktualisierter Inhalt", 120, 60);
 
 		// Create incremental job where only title changed
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
@@ -408,7 +428,6 @@ public class TranslatorTest {
 			List.of("title", "perex"),
 			"---\ntitle: Old Title\nperex: Description\n---\n# Original Content",  // original
 			"---\ntitle: Alter Titel\nperex: Beschreibung\n---\n# Urspruenglicher Inhalt",  // existing translation
-			"@@ -1 +1 @@\n-Old Title\n+New Title",
 			"abc123",
 			1
 		);
@@ -417,7 +436,7 @@ public class TranslatorTest {
 		final TranslationResult result = stage.toCompletableFuture().get();
 
 		assertTrue(result.success());
-		// Two calls should have been made (front matter + body)
+		// Two calls should have been made (front matter + body section)
 		assertEquals(2, mockModel.getCallCount());
 		// Result should contain both fields
 		final String content = result.translatedContent();
@@ -425,25 +444,25 @@ public class TranslatorTest {
 		assertTrue(content.contains("[[perex]]"));
 	}
 
-	// ============== Diff-Based Incremental Translation Tests ==============
+	// ============== Section-Based Incremental Translation Tests ==============
 
 	@Test
-	@DisplayName("shouldHandleEmptyDiffResponseCorrectly")
-	void shouldHandleEmptyDiffResponseCorrectly() throws Exception {
-		// Empty diff means no changes needed - return existing translation
-		mockModel.setResponse("", 100, 10);
+	@DisplayName("shouldKeepExistingTranslationWhenAllSectionsUnchanged")
+	void shouldKeepExistingTranslationWhenAllSectionsUnchanged() throws Exception {
+		// If source is identical, no LLM calls needed for body
+		final String source = "# Title\n\nContent here.";
+		final String translation = "# Titel\n\nInhalt hier.";
 
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
 			Path.of("/source/doc.md"),
 			Path.of("/target/de/doc.md"),
 			Locale.GERMAN,
-			"# Same Content",
+			source,    // same as original
 			"def456",
 			null,
 			null,
-			"# Same Content",
-			"# Gleicher Inhalt",
-			"",  // No diff
+			source,    // original source
+			translation,
 			"abc123",
 			1
 		);
@@ -452,35 +471,32 @@ public class TranslatorTest {
 		final TranslationResult result = stage.toCompletableFuture().get();
 
 		assertTrue(result.success());
-		assertEquals("# Gleicher Inhalt", result.translatedContent());
+		// No LLM calls should be made (all sections unchanged)
+		assertEquals(0, mockModel.getCallCount());
+		// Existing translation should be preserved
+		assertEquals(translation, result.translatedContent());
 	}
 
 	@Test
-	@DisplayName("shouldRetryWithCorrectionPromptOnInvalidDiff")
-	void shouldRetryWithCorrectionPromptOnInvalidDiff() throws Exception {
-		// First response is invalid diff
-		mockModel.addResponse("This is not a valid diff", 100, 50);
-		// Second response (retry) is valid diff
-		final String validDiff = """
-			--- a/translation
-			+++ b/translation
-			@@ -1 +1 @@
-			-# Urspruenglicher Inhalt
-			+# Korrigierter Inhalt
-			""";
-		mockModel.addResponse(validDiff, 150, 75);
+	@DisplayName("shouldTranslateOnlyModifiedSections")
+	void shouldTranslateOnlyModifiedSections() throws Exception {
+		// LLM called only for the modified section
+		mockModel.setResponse("## Neuer Abschnitt\n\nNeuer uebersetzter Inhalt.", 100, 50);
+
+		final String oldSource = "# Title\n\nIntro.\n\n## Section A\n\nOriginal.";
+		final String newSource = "# Title\n\nIntro.\n\n## Section A\n\nModified.";
+		final String existingTranslation = "# Titel\n\nEinleitung.\n\n## Abschnitt A\n\nUrspruenglich.";
 
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
 			Path.of("/source/doc.md"),
 			Path.of("/target/de/doc.md"),
 			Locale.GERMAN,
-			"# Fixed Content",
+			newSource,
 			"def456",
 			null,
 			null,
-			"# Original Content",
-			"# Urspruenglicher Inhalt",
-			"@@ -1 +1 @@\n-Original\n+Fixed",
+			oldSource,
+			existingTranslation,
 			"abc123",
 			1
 		);
@@ -489,81 +505,12 @@ public class TranslatorTest {
 		final TranslationResult result = stage.toCompletableFuture().get();
 
 		assertTrue(result.success());
-		// Should have made 2 calls (initial + retry)
-		assertEquals(2, mockModel.getCallCount());
-		assertEquals("# Korrigierter Inhalt", result.translatedContent());
-		// Token counts should include both attempts
-		assertEquals(250, result.inputTokens());
-		assertEquals(125, result.outputTokens());
-	}
-
-	@Test
-	@DisplayName("shouldFailJobAfterSecondInvalidDiff")
-	void shouldFailJobAfterSecondInvalidDiff() throws Exception {
-		// Both attempts return invalid diffs
-		mockModel.addResponse("Invalid diff 1", 100, 50);
-		mockModel.addResponse("Invalid diff 2", 100, 50);
-
-		final TranslateIncrementalJob job = new TranslateIncrementalJob(
-			Path.of("/source/doc.md"),
-			Path.of("/target/de/doc.md"),
-			Locale.GERMAN,
-			"# Updated Content",
-			"def456",
-			null,
-			null,
-			"# Original Content",
-			"# Urspruenglicher Inhalt",
-			"@@ -1 +1 @@\n-Original\n+Updated",
-			"abc123",
-			1
-		);
-
-		final CompletionStage<TranslationResult> stage = translator.translate(job);
-		final TranslationResult result = stage.toCompletableFuture().get();
-
-		assertFalse(result.success());
-		// Should have made 2 calls (initial + retry)
-		assertEquals(2, mockModel.getCallCount());
-		assertTrue(result.errorMessage().contains("BODY_DIFF"));
-		assertTrue(result.errorMessage().contains("failed after retry"));
-	}
-
-	@Test
-	@DisplayName("shouldApplyValidDiffToExistingTranslation")
-	void shouldApplyValidDiffToExistingTranslation() throws Exception {
-		// Multi-line diff example
-		final String validDiff = """
-			--- a/translation
-			+++ b/translation
-			@@ -1,3 +1,3 @@
-			 # Titel
-
-			-Alter Absatz.
-			+Neuer Absatz mit mehr Text.
-			""";
-		mockModel.setResponse(validDiff, 200, 100);
-
-		final TranslateIncrementalJob job = new TranslateIncrementalJob(
-			Path.of("/source/doc.md"),
-			Path.of("/target/de/doc.md"),
-			Locale.GERMAN,
-			"# Title\n\nNew paragraph with more text.",
-			"def456",
-			null,
-			null,
-			"# Title\n\nOld paragraph.",
-			"# Titel\n\nAlter Absatz.",
-			"@@ -3 +3 @@\n-Old paragraph.\n+New paragraph with more text.",
-			"abc123",
-			1
-		);
-
-		final CompletionStage<TranslationResult> stage = translator.translate(job);
-		final TranslationResult result = stage.toCompletableFuture().get();
-
-		assertTrue(result.success());
-		assertEquals("# Titel\n\nNeuer Absatz mit mehr Text.", result.translatedContent());
+		// Only 1 LLM call for the modified section
+		assertEquals(1, mockModel.getCallCount());
+		// Unchanged intro section should be preserved
+		final String content = result.translatedContent();
+		assertTrue(content.contains("# Titel"), "Unchanged title section preserved");
+		assertTrue(content.contains("Einleitung"), "Unchanged intro content preserved");
 	}
 
 	/**

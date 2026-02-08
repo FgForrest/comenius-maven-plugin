@@ -7,18 +7,18 @@ import dev.langchain4j.exception.NonRetriableException;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.output.TokenUsage;
-import io.evitadb.comenius.diff.DiffApplicationException;
-import io.evitadb.comenius.diff.DiffParseException;
-import io.evitadb.comenius.diff.DiffResult;
-import io.evitadb.comenius.diff.UnifiedDiffApplicator;
-import io.evitadb.comenius.diff.UnifiedDiffParser;
 import io.evitadb.comenius.llm.LlmClient;
 import io.evitadb.comenius.llm.PromptLoader;
 import io.evitadb.comenius.model.DocumentChunk;
+import io.evitadb.comenius.model.DocumentSection;
+import io.evitadb.comenius.model.DocumentSectionSplitter;
 import io.evitadb.comenius.model.DocumentSplitter;
 import io.evitadb.comenius.model.FrontMatterTranslationHelper;
+import io.evitadb.comenius.model.HeadingStructureMismatchException;
 import io.evitadb.comenius.model.MarkdownDocument;
 import io.evitadb.comenius.model.PhaseResult;
+import io.evitadb.comenius.model.SectionAligner;
+import io.evitadb.comenius.model.SectionAlignment;
 import io.evitadb.comenius.model.TranslateIncrementalJob;
 import io.evitadb.comenius.model.TranslateNewJob;
 import io.evitadb.comenius.model.TranslationJob;
@@ -45,6 +45,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * Uses {@link LlmClient} for LLM communication with permanent failure detection.
  * LangChain4j handles retry logic internally. Non-retriable failures (authentication, quota exceeded)
  * are propagated to allow immediate shutdown.
+ *
+ * For incremental translations, uses section-based approach: splits documents at heading boundaries,
+ * compares sections by hash, and retranslates only changed/added sections.
  */
 public class Translator {
 
@@ -57,10 +60,6 @@ public class Translator {
 	private final PromptLoader promptLoader;
 	@Nullable
 	private final Executor executor;
-	@Nonnull
-	private final UnifiedDiffParser diffParser;
-	@Nonnull
-	private final UnifiedDiffApplicator diffApplicator;
 	@Nonnull
 	private final DocumentSplitter documentSplitter;
 	private final AtomicLong inputTokenCount = new AtomicLong(0);
@@ -83,8 +82,6 @@ public class Translator {
 		this.llmClient = Objects.requireNonNull(llmClient, "llmClient must not be null");
 		this.promptLoader = Objects.requireNonNull(promptLoader, "promptLoader must not be null");
 		this.executor = executor;
-		this.diffParser = new UnifiedDiffParser();
-		this.diffApplicator = new UnifiedDiffApplicator();
 		this.documentSplitter = new DocumentSplitter();
 	}
 
@@ -249,8 +246,7 @@ public class Translator {
 
 	/**
 	 * Phase 2: Translates article body.
-	 * Uses the job's polymorphic prompt building (different templates for new vs incremental).
-	 * For incremental jobs, the LLM returns a diff that is applied to the existing translation.
+	 * For incremental jobs, uses section-based translation to only retranslate changed sections.
 	 * For new jobs with large bodies, splits into chunks and translates sequentially.
 	 * Skips this phase if Phase 1 failed.
 	 *
@@ -270,6 +266,11 @@ public class Translator {
 
 		final TranslationJob job = currentResult.job();
 
+		// For incremental jobs, use section-based translation
+		if (job instanceof TranslateIncrementalJob incrementalJob) {
+			return translateSectionBased(currentResult, incrementalJob, executor);
+		}
+
 		// For new jobs, check if document needs splitting
 		if (job instanceof TranslateNewJob newJob) {
 			final MarkdownDocument sourceDoc = new MarkdownDocument(newJob.getSourceContent());
@@ -287,7 +288,8 @@ public class Translator {
 	}
 
 	/**
-	 * Translates a single body (non-chunked) for both new and incremental jobs.
+	 * Translates a single body (non-chunked) for new jobs.
+	 * After translation, validates heading structure matches the source.
 	 *
 	 * @param currentResult the current phase result
 	 * @param job           the translation job
@@ -323,15 +325,11 @@ public class Translator {
 
 				final String llmResponse = response.aiMessage().text();
 
-				// For incremental jobs, apply diff to existing translation
-				if (job instanceof TranslateIncrementalJob incrementalJob) {
-					return processDiffBasedTranslation(
-						currentResult, incrementalJob, llmResponse,
-						inputTokens, outputTokens, elapsedMillis
-					);
+				// Validate heading structure for new translations
+				if (job instanceof TranslateNewJob) {
+					validateHeadingStructure(job, llmResponse);
 				}
 
-				// For new translations, return the response directly
 				return currentResult.withBody(llmResponse, inputTokens, outputTokens, elapsedMillis);
 
 			} catch (NonRetriableException e) {
@@ -348,6 +346,7 @@ public class Translator {
 	/**
 	 * Translates a document body in chunks for large documents.
 	 * Chunks are translated sequentially to respect rate limits and maintain consistency.
+	 * After all chunks are joined, validates heading structure matches the source.
 	 *
 	 * @param currentResult the current phase result
 	 * @param job           the new translation job
@@ -381,8 +380,17 @@ public class Translator {
 			if (!state.success()) {
 				return state.toFailedPhaseResult();
 			}
+			final String joinedBody = state.getJoinedTranslation();
+
+			// Validate heading structure for chunked translations
+			try {
+				validateHeadingStructure(job, joinedBody);
+			} catch (HeadingStructureMismatchException e) {
+				return currentResult.withFailure("BODY", e.getMessage(), state.totalElapsedMillis);
+			}
+
 			return currentResult.withBody(
-				state.getJoinedTranslation(),
+				joinedBody,
 				state.totalInputTokens,
 				state.totalOutputTokens,
 				state.totalElapsedMillis
@@ -513,142 +521,319 @@ public class Translator {
 	}
 
 	/**
-	 * Processes diff-based translation for incremental jobs.
-	 * Parses the LLM response as a unified diff and applies it to the existing translation.
-	 * If diff parsing/application fails, retries once with a correction prompt.
+	 * Translates an incremental job using section-based approach.
+	 * Splits old source, new source, and existing translation into sections,
+	 * aligns old/new sections via LCS, and retranslates only changed/added sections.
 	 *
-	 * @param currentResult   the current phase result
-	 * @param job             the incremental translation job
-	 * @param llmResponse     the diff response from LLM
-	 * @param inputTokens     tokens used for the request
-	 * @param outputTokens    tokens generated in response
-	 * @param elapsedMillis   time elapsed for translation
-	 * @return updated PhaseResult with applied translation or failure
+	 * @param currentResult the current phase result
+	 * @param job           the incremental translation job
+	 * @param executor      the executor for async operations
+	 * @return CompletionStage with updated PhaseResult
 	 */
 	@Nonnull
-	private PhaseResult processDiffBasedTranslation(
+	private CompletionStage<PhaseResult> translateSectionBased(
 		@Nonnull PhaseResult currentResult,
 		@Nonnull TranslateIncrementalJob job,
-		@Nonnull String llmResponse,
-		long inputTokens,
-		long outputTokens,
-		long elapsedMillis
+		@Nonnull Executor executor
 	) {
-		final String existingBody = job.getExistingTranslationBody();
+		// Split old source, new source, and existing translation into sections
+		final MarkdownDocument oldSourceDoc = new MarkdownDocument(job.getOriginalSource());
+		final MarkdownDocument newSourceDoc = new MarkdownDocument(job.getSourceContent());
+		final String existingTranslationBody = job.getExistingTranslationBody();
 
-		// Handle empty diff response - no changes needed
-		if (llmResponse.isBlank()) {
-			return currentResult.withBody(existingBody, inputTokens, outputTokens, elapsedMillis);
-		}
+		final List<DocumentSection> oldSections = DocumentSectionSplitter.split(oldSourceDoc.getBodyContent());
+		final List<DocumentSection> newSections = DocumentSectionSplitter.split(newSourceDoc.getBodyContent());
+		final List<DocumentSection> translationSections = DocumentSectionSplitter.split(existingTranslationBody);
 
-		try {
-			// Try to parse and apply the diff
-			final DiffResult diff = this.diffParser.parse(llmResponse);
+		// Align old ↔ new sections
+		final List<SectionAlignment> alignments = SectionAligner.align(oldSections, newSections);
 
-			// Empty diff means no changes
-			if (diff.isEmpty()) {
-				return currentResult.withBody(existingBody, inputTokens, outputTokens, elapsedMillis);
+		// Build result: for each alignment, either keep existing translation or translate
+		// Prepare the ordered list of result sections
+		final List<SectionTranslationTask> tasks = new ArrayList<>();
+		for (final SectionAlignment alignment : alignments) {
+			switch (alignment.type()) {
+				case UNCHANGED -> {
+					// Find corresponding translation section
+					final String translatedContent = findTranslationForOldSection(
+						alignment.oldIndex(), oldSections, translationSections
+					);
+					tasks.add(new SectionTranslationTask(
+						alignment.newIndex(), translatedContent, false
+					));
+				}
+				case MODIFIED -> {
+					// Needs retranslation — use new source section content
+					tasks.add(new SectionTranslationTask(
+						alignment.newIndex(), newSections.get(alignment.newIndex()).content(), true
+					));
+				}
+				case ADDED -> {
+					// New section — translate from scratch
+					tasks.add(new SectionTranslationTask(
+						alignment.newIndex(), newSections.get(alignment.newIndex()).content(), true
+					));
+				}
+				case DELETED -> {
+					// Drop from output — do nothing
+				}
 			}
-
-			final String translatedBody = this.diffApplicator.apply(existingBody, diff);
-			return currentResult.withBody(translatedBody, inputTokens, outputTokens, elapsedMillis);
-
-		} catch (DiffParseException | DiffApplicationException e) {
-			// First attempt failed, retry with correction prompt
-			return retryDiffTranslation(currentResult, job, llmResponse, inputTokens, outputTokens, elapsedMillis, e);
 		}
+
+		// Build the result array for section ordering
+		final String[] resultSections = new String[tasks.size()];
+
+		// Collect context information for tasks that need translation
+		// Build the pre-populated context from already-translated (UNCHANGED) sections
+		for (int i = 0; i < tasks.size(); i++) {
+			final SectionTranslationTask task = tasks.get(i);
+			if (!task.needsTranslation()) {
+				resultSections[i] = task.content();
+			}
+		}
+
+		// Chain section translations sequentially
+		CompletionStage<SectionBasedState> stage = CompletableFuture.completedFuture(
+			new SectionBasedState(currentResult, resultSections, tasks)
+		);
+
+		for (int i = 0; i < tasks.size(); i++) {
+			final int taskIndex = i;
+			final SectionTranslationTask task = tasks.get(i);
+			if (task.needsTranslation()) {
+				stage = stage.thenCompose(state -> {
+					if (!state.success()) {
+						return CompletableFuture.completedFuture(state);
+					}
+					return translateSection(state, job, task, taskIndex, executor);
+				});
+			}
+		}
+
+		// Convert to PhaseResult
+		return stage.thenApply(state -> {
+			if (!state.success()) {
+				return state.toFailedPhaseResult();
+			}
+			return currentResult.withBody(
+				state.getJoinedResult(),
+				state.totalInputTokens,
+				state.totalOutputTokens,
+				state.totalElapsedMillis
+			);
+		});
 	}
 
 	/**
-	 * Retries diff-based translation with a correction prompt.
-	 * If the retry also fails, marks the job as failed.
+	 * Finds the translated content corresponding to an old section index.
+	 * Uses position-based mapping: if old section at index N, try to use translation section at
+	 * same relative position. Falls back to empty string if no matching translation exists.
 	 *
-	 * @param currentResult      the current phase result
-	 * @param job                the incremental translation job
-	 * @param invalidResponse    the invalid diff from the first attempt
-	 * @param firstInputTokens   tokens used in first attempt
-	 * @param firstOutputTokens  tokens generated in first attempt
-	 * @param firstElapsedMillis time elapsed in first attempt
-	 * @param firstError         the error from the first attempt
-	 * @return updated PhaseResult with applied translation or failure
+	 * @param oldIndex            index in old sections
+	 * @param oldSections         the old source sections
+	 * @param translationSections the existing translation sections
+	 * @return the translated content for this section
 	 */
 	@Nonnull
-	private PhaseResult retryDiffTranslation(
-		@Nonnull PhaseResult currentResult,
-		@Nonnull TranslateIncrementalJob job,
-		@Nonnull String invalidResponse,
-		long firstInputTokens,
-		long firstOutputTokens,
-		long firstElapsedMillis,
-		@Nonnull Exception firstError
+	private String findTranslationForOldSection(
+		int oldIndex,
+		@Nonnull List<DocumentSection> oldSections,
+		@Nonnull List<DocumentSection> translationSections
 	) {
-		final long retryStartTime = System.currentTimeMillis();
+		// If translation has same number of sections, use direct index mapping
+		if (oldIndex < translationSections.size()) {
+			return translationSections.get(oldIndex).content();
+		}
+		// Fallback: use old source content (will need retranslation eventually)
+		if (oldIndex < oldSections.size()) {
+			return oldSections.get(oldIndex).content();
+		}
+		return "";
+	}
 
-		try {
-			// Build retry prompt with the invalid response
-			final String systemPrompt = job.buildSystemPrompt(this.promptLoader);
-			final String retryPrompt = job.buildRetryPrompt(this.promptLoader, invalidResponse);
+	/**
+	 * Translates a single section with surrounding context.
+	 *
+	 * @param state     the current section-based translation state
+	 * @param job       the incremental translation job
+	 * @param task      the section translation task
+	 * @param taskIndex the index of this task in the result array
+	 * @param executor  the executor for async operations
+	 * @return CompletionStage with updated state
+	 */
+	@Nonnull
+	private CompletionStage<SectionBasedState> translateSection(
+		@Nonnull SectionBasedState state,
+		@Nonnull TranslateIncrementalJob job,
+		@Nonnull SectionTranslationTask task,
+		int taskIndex,
+		@Nonnull Executor executor
+	) {
+		// Build context from surrounding sections
+		final String precedingContext = state.getPrecedingContext(taskIndex);
+		final String followingContext = state.getFollowingContext(taskIndex);
 
-			final List<ChatMessage> messages = List.of(
-				SystemMessage.from(systemPrompt),
-				UserMessage.from(retryPrompt)
-			);
+		final String systemPrompt = job.buildSystemPrompt(this.promptLoader);
+		final String userPrompt = job.buildSectionUserPrompt(
+			this.promptLoader, task.content(), precedingContext, followingContext
+		);
 
-			final ChatResponse retryResponse = this.llmClient.chat(messages);
-			final long retryElapsedMillis = System.currentTimeMillis() - retryStartTime;
-			final TokenUsage retryTokenUsage = retryResponse.tokenUsage();
+		return CompletableFuture.supplyAsync(() -> {
+			final long startTime = System.currentTimeMillis();
+			try {
+				final List<ChatMessage> messages = List.of(
+					SystemMessage.from(systemPrompt),
+					UserMessage.from(userPrompt)
+				);
 
-			final long retryInputTokens = retryTokenUsage != null ? retryTokenUsage.inputTokenCount() : 0;
-			final long retryOutputTokens = retryTokenUsage != null ? retryTokenUsage.outputTokenCount() : 0;
+				final ChatResponse response = this.llmClient.chat(messages);
+				final long elapsedMillis = System.currentTimeMillis() - startTime;
+				final TokenUsage tokenUsage = response.tokenUsage();
 
-			this.inputTokenCount.addAndGet(retryInputTokens);
-			this.outputTokenCount.addAndGet(retryOutputTokens);
+				final long inputTokens = tokenUsage != null ? tokenUsage.inputTokenCount() : 0;
+				final long outputTokens = tokenUsage != null ? tokenUsage.outputTokenCount() : 0;
 
-			final String retryLlmResponse = retryResponse.aiMessage().text();
-			final String existingBody = job.getExistingTranslationBody();
+				this.inputTokenCount.addAndGet(inputTokens);
+				this.outputTokenCount.addAndGet(outputTokens);
 
-			// Handle empty retry response
-			if (retryLlmResponse.isBlank()) {
-				final long totalInput = firstInputTokens + retryInputTokens;
-				final long totalOutput = firstOutputTokens + retryOutputTokens;
-				final long totalElapsed = firstElapsedMillis + retryElapsedMillis;
-				return currentResult.withBody(existingBody, totalInput, totalOutput, totalElapsed);
+				final String translatedSection = response.aiMessage().text();
+				return state.withTranslatedSection(taskIndex, translatedSection, inputTokens, outputTokens, elapsedMillis);
+
+			} catch (NonRetriableException e) {
+				throw e;
+			} catch (Exception e) {
+				final long elapsedMillis = System.currentTimeMillis() - startTime;
+				return state.withFailure("BODY_SECTION_" + taskIndex, e.getMessage(), elapsedMillis);
 			}
+		}, executor);
+	}
 
-			// Try to parse and apply the retry diff
-			final DiffResult retryDiff = this.diffParser.parse(retryLlmResponse);
+	/**
+	 * Validates that the translated body has the same heading structure as the source.
+	 *
+	 * @param job            the translation job
+	 * @param translatedBody the translated body content
+	 * @throws HeadingStructureMismatchException if structures don't match
+	 */
+	private void validateHeadingStructure(
+		@Nonnull TranslationJob job,
+		@Nonnull String translatedBody
+	) throws HeadingStructureMismatchException {
+		final MarkdownDocument sourceDoc = new MarkdownDocument(job.getSourceContent());
+		final String sourceBody = sourceDoc.getBodyContent();
 
-			if (retryDiff.isEmpty()) {
-				final long totalInput = firstInputTokens + retryInputTokens;
-				final long totalOutput = firstOutputTokens + retryOutputTokens;
-				final long totalElapsed = firstElapsedMillis + retryElapsedMillis;
-				return currentResult.withBody(existingBody, totalInput, totalOutput, totalElapsed);
+		final List<DocumentSection> sourceSections = DocumentSectionSplitter.split(sourceBody);
+		final List<DocumentSection> translatedSections = DocumentSectionSplitter.split(translatedBody);
+
+		DocumentSectionSplitter.validateHeadingStructure(sourceSections, translatedSections);
+	}
+
+	/**
+	 * Internal record for a section that either keeps its existing translation or needs retranslation.
+	 *
+	 * @param newIndex          index in new section list
+	 * @param content           either translated content (if unchanged) or source content to translate
+	 * @param needsTranslation  true if this section needs LLM translation
+	 */
+	private record SectionTranslationTask(
+		int newIndex,
+		@Nonnull String content,
+		boolean needsTranslation
+	) {}
+
+	/**
+	 * Internal state for tracking section-based translation progress.
+	 */
+	private static class SectionBasedState {
+		private final PhaseResult originalResult;
+		private final String[] resultSections;
+		private final List<SectionTranslationTask> tasks;
+		private long totalInputTokens = 0;
+		private long totalOutputTokens = 0;
+		private long totalElapsedMillis = 0;
+		private String errorPhase = null;
+		private String errorMessage = null;
+
+		SectionBasedState(
+			PhaseResult originalResult,
+			String[] resultSections,
+			List<SectionTranslationTask> tasks
+		) {
+			this.originalResult = originalResult;
+			this.resultSections = resultSections;
+			this.tasks = tasks;
+		}
+
+		boolean success() {
+			return this.errorPhase == null;
+		}
+
+		SectionBasedState withTranslatedSection(
+			int taskIndex, String translation, long inputTokens, long outputTokens, long elapsedMillis
+		) {
+			this.resultSections[taskIndex] = translation;
+			this.totalInputTokens += inputTokens;
+			this.totalOutputTokens += outputTokens;
+			this.totalElapsedMillis += elapsedMillis;
+			return this;
+		}
+
+		SectionBasedState withFailure(String phase, String message, long elapsedMillis) {
+			this.errorPhase = phase;
+			this.errorMessage = message;
+			this.totalElapsedMillis += elapsedMillis;
+			return this;
+		}
+
+		/**
+		 * Gets preceding translated context for a section at the given task index.
+		 * Returns content of the immediately preceding section that is already translated.
+		 */
+		@Nonnull
+		String getPrecedingContext(int taskIndex) {
+			for (int i = taskIndex - 1; i >= 0; i--) {
+				if (this.resultSections[i] != null) {
+					return this.resultSections[i];
+				}
 			}
+			return "";
+		}
 
-			final String translatedBody = this.diffApplicator.apply(existingBody, retryDiff);
-			final long totalInput = firstInputTokens + retryInputTokens;
-			final long totalOutput = firstOutputTokens + retryOutputTokens;
-			final long totalElapsed = firstElapsedMillis + retryElapsedMillis;
-			return currentResult.withBody(translatedBody, totalInput, totalOutput, totalElapsed);
+		/**
+		 * Gets following translated context for a section at the given task index.
+		 * Returns content of the next section that is already translated (UNCHANGED sections).
+		 */
+		@Nonnull
+		String getFollowingContext(int taskIndex) {
+			for (int i = taskIndex + 1; i < this.resultSections.length; i++) {
+				if (this.resultSections[i] != null) {
+					return this.resultSections[i];
+				}
+			}
+			return "";
+		}
 
-		} catch (NonRetriableException e) {
-			// Propagate permanent failures
-			throw e;
-		} catch (DiffParseException | DiffApplicationException e) {
-			// Both attempts failed - mark as failed
-			final long retryElapsedMillis = System.currentTimeMillis() - retryStartTime;
-			final long totalElapsed = firstElapsedMillis + retryElapsedMillis;
-			return currentResult.withFailure(
-				"BODY_DIFF",
-				"Diff translation failed after retry. First error: " + firstError.getMessage() +
-					"; Retry error: " + e.getMessage(),
-				totalElapsed
+		@Nonnull
+		String getJoinedResult() {
+			final StringBuilder sb = new StringBuilder();
+			for (int i = 0; i < this.resultSections.length; i++) {
+				final String section = this.resultSections[i];
+				if (section != null) {
+					if (sb.length() > 0 && !sb.toString().endsWith("\n")) {
+						sb.append("\n\n");
+					}
+					sb.append(section);
+				}
+			}
+			return sb.toString();
+		}
+
+		PhaseResult toFailedPhaseResult() {
+			return this.originalResult.withFailure(
+				this.errorPhase,
+				this.errorMessage,
+				this.totalElapsedMillis
 			);
-		} catch (Exception e) {
-			// Other errors during retry
-			final long retryElapsedMillis = System.currentTimeMillis() - retryStartTime;
-			final long totalElapsed = firstElapsedMillis + retryElapsedMillis;
-			return currentResult.withFailure("BODY_DIFF", e.getMessage(), totalElapsed);
 		}
 	}
 

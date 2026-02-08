@@ -10,14 +10,12 @@ import javax.annotation.Nullable;
  * @param currentCommit    the current HEAD commit hash for the source file (required, never null)
  * @param translatedCommit the commit hash from existing translation's front matter (null for new files)
  * @param commitCount      the number of commits between translatedCommit and currentCommit (0 for new files)
- * @param diff             the unified diff between the two commits (null for new files or when no changes)
  * @param originalSource   the source content at translatedCommit (null for new files)
  */
 public record CommitInfo(
 	@Nonnull String currentCommit,
 	@Nullable String translatedCommit,
 	int commitCount,
-	@Nullable String diff,
 	@Nullable String originalSource
 ) {
 

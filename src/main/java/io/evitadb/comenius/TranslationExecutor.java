@@ -356,14 +356,16 @@ public final class TranslationExecutor {
 		// Parse source document to get all properties (order preserved via LinkedHashMap)
 		final MarkdownDocument sourceDoc = new MarkdownDocument(job.getSourceContent());
 
-		// Get the expected translatable fields from the job
-		final Map<String, String> expectedFields = job.getExtractedTranslatableFields();
+		// Get ALL translatable fields from source for parsing
+		// (Translator.translateFrontMatter always translates all configured fields)
+		final Map<String, String> allTranslatableFields = FrontMatterTranslationHelper
+			.extractTranslatableFields(sourceDoc, job.getTranslatableFrontMatterFields());
 
 		// Parse translated field values from response and extract body
 		final Map<String, String> translatedFields = FrontMatterTranslationHelper
-			.parseTranslatedFields(translatedContent, expectedFields);
+			.parseTranslatedFields(translatedContent, allTranslatableFields);
 		final String bodyContent = FrontMatterTranslationHelper
-			.extractBodyFromResponse(translatedContent, expectedFields);
+			.extractBodyFromResponse(translatedContent, allTranslatableFields);
 
 		// Create document from translated body content (empty properties initially)
 		final MarkdownDocument doc = new MarkdownDocument(bodyContent);

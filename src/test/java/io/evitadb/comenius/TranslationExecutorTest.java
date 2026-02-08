@@ -71,6 +71,8 @@ public class TranslationExecutorTest {
 	@DisplayName("shouldContinueOnIndividualFailure")
 	void shouldContinueOnIndividualFailure() throws Exception {
 		// Alternate between success and failure
+		// Set a response with matching heading structure for successful calls
+		mockModel.setResponse("# Translated", 100, 50);
 		mockModel.setAlternatingBehavior(true);
 
 		final List<TranslationJob> jobs = createJobs(4);
@@ -86,7 +88,7 @@ public class TranslationExecutorTest {
 	@Test
 	@DisplayName("shouldReturnCorrectSummary")
 	void shouldReturnCorrectSummary() throws Exception {
-		mockModel.setResponse("translated", 100, 50);
+		mockModel.setResponse("# Translated", 100, 50);
 
 		final List<TranslationJob> jobs = createJobs(3);
 

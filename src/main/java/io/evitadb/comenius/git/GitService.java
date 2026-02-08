@@ -176,16 +176,15 @@ public final class GitService {
 
 		// If no previous translation, return info for new file
 		if (translatedCommit == null) {
-			return Optional.of(new CommitInfo(currentCommit, null, 0, null, null));
+			return Optional.of(new CommitInfo(currentCommit, null, 0, null));
 		}
 
 		// If same commit, file is up-to-date
 		if (translatedCommit.equals(currentCommit)) {
-			return Optional.of(new CommitInfo(currentCommit, translatedCommit, 0, null, null));
+			return Optional.of(new CommitInfo(currentCommit, translatedCommit, 0, null));
 		}
 
-		// Gather diff, commit count, and original source for incremental update
-		final Optional<String> diffOpt = getDiff(file, translatedCommit, currentCommit);
+		// Gather commit count and original source for incremental update
 		final int commitCount = getCommitCount(file, translatedCommit, currentCommit);
 		final Optional<String> originalSourceOpt = getFileAtCommit(file, translatedCommit);
 
@@ -193,7 +192,6 @@ public final class GitService {
 			currentCommit,
 			translatedCommit,
 			commitCount,
-			diffOpt.orElse(null),
 			originalSourceOpt.orElse(null)
 		));
 	}

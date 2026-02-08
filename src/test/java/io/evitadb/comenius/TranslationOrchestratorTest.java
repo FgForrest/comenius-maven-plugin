@@ -119,7 +119,6 @@ public class TranslationOrchestratorTest {
 
 		final TranslateIncrementalJob job = (TranslateIncrementalJob) jobOpt.get();
 		assertEquals(1, job.getCommitCount());
-		assertNotNull(job.getDiff());
 		assertEquals(oldCommit, job.getTranslatedCommit());
 	}
 

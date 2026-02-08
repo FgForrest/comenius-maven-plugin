@@ -66,23 +66,21 @@ public class TranslationJobTest {
 	}
 
 	@Test
-	@DisplayName("shouldBuildUserPromptWithDiff")
-	void shouldBuildUserPromptWithDiff() {
+	@DisplayName("shouldBuildUserPromptForIncrementalJob")
+	void shouldBuildUserPromptForIncrementalJob() {
 		final String originalSource = "# Hello\n\nOriginal content.";
 		final String existingTranslation = "# Hallo\n\nOriginaler Inhalt.";
-		final String diff = "@@ -1,2 +1,2 @@\n-Original\n+Modified";
 
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
 			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS, null,
-			originalSource, existingTranslation, diff, "oldcommit123", 3
+			originalSource, existingTranslation, "oldcommit123", 3
 		);
 
 		final String userPrompt = job.buildUserPrompt(promptLoader);
 
 		assertNotNull(userPrompt);
-		// Diff-based incremental prompts include existing translation and diff, but not original source
-		assertTrue(userPrompt.contains(existingTranslation), "Should contain existing translation");
-		assertTrue(userPrompt.contains(diff), "Should contain diff");
+		// Section-based incremental prompts include existing translation body
+		assertTrue(userPrompt.contains("Originaler Inhalt"), "Should contain existing translation body");
 	}
 
 	@Test
@@ -144,7 +142,7 @@ public class TranslationJobTest {
 
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
 			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, longCurrentCommit, null, null,
-			"original", "translated", "diff", longTranslatedCommit, 5
+			"original", "translated", longTranslatedCommit, 5
 		);
 
 		assertEquals("1234567", job.getCurrentCommitShort());
@@ -158,7 +156,7 @@ public class TranslationJobTest {
 
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
 			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, shortCommit, null, null,
-			"original", "translated", "diff", "xyz", 1
+			"original", "translated", "xyz", 1
 		);
 
 		assertEquals("abc", job.getCurrentCommitShort());
@@ -185,18 +183,16 @@ public class TranslationJobTest {
 	void shouldReturnIncrementalJobGetters() {
 		final String originalSource = "original";
 		final String existingTranslation = "translated";
-		final String diff = "diff content";
 		final String translatedCommit = "oldcommit123";
 		final int commitCount = 5;
 
 		final TranslateIncrementalJob job = new TranslateIncrementalJob(
 			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, null, null,
-			originalSource, existingTranslation, diff, translatedCommit, commitCount
+			originalSource, existingTranslation, translatedCommit, commitCount
 		);
 
 		assertEquals(originalSource, job.getOriginalSource());
 		assertEquals(existingTranslation, job.getExistingTranslation());
-		assertEquals(diff, job.getDiff());
 		assertEquals(translatedCommit, job.getTranslatedCommit());
 		assertEquals(commitCount, job.getCommitCount());
 	}
@@ -204,7 +200,7 @@ public class TranslationJobTest {
 	private TranslateIncrementalJob createIncrementalJob() {
 		return new TranslateIncrementalJob(
 			SOURCE_FILE, TARGET_FILE, GERMAN, SOURCE_CONTENT, CURRENT_COMMIT, INSTRUCTIONS, null,
-			"original source", "existing translation", "diff", "oldcommit", 2
+			"original source", "existing translation", "oldcommit", 2
 		);
 	}
 }

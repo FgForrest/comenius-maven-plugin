@@ -139,7 +139,6 @@ public final class TranslationOrchestrator {
 			translatableFrontMatterFields,
 			commitInfo.originalSource(),
 			existingTranslation,
-			commitInfo.diff() != null ? commitInfo.diff() : "",
 			commitInfo.translatedCommit(),
 			commitInfo.commitCount()
 		));

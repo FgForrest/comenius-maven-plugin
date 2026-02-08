@@ -315,7 +315,6 @@ public class GitServiceTest {
 		assertFalse(info.isUpToDate());
 		assertNotNull(info.currentCommit());
 		assertNull(info.translatedCommit());
-		assertNull(info.diff());
 		assertNull(info.originalSource());
 		assertEquals(0, info.commitCount());
 	}
@@ -363,9 +362,6 @@ public class GitServiceTest {
 		assertFalse(info.isUpToDate());
 		assertEquals(newCommit, info.currentCommit());
 		assertEquals(oldCommit, info.translatedCommit());
-		assertNotNull(info.diff());
-		assertTrue(info.diff().contains("-old content"));
-		assertTrue(info.diff().contains("+new content"));
 		assertEquals("old content", info.originalSource());
 		assertEquals(1, info.commitCount());
 	}

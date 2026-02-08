@@ -1,0 +1,6 @@
+{{customInstructions}}
+{{precedingContext}}
+[[TRANSLATE]]
+{{sectionContent}}
+[[/TRANSLATE]]
+{{followingContext}}

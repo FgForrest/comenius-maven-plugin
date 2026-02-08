@@ -77,7 +77,6 @@ public class TranslationResultTest {
 			null,
 			"original",
 			"translated",
-			"diff",
 			"old123",
 			3
 		);
