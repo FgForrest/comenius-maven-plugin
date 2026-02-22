@@ -10,13 +10,40 @@
 
     <name>comenius-maven-plugin</name>
     <description>Maven plugin for translating Markdown files using an LLM engine.</description>
-    <url>https://github.com/evitadb/comenius-maven-plugin</url>
+    <url>https://github.com/FgForrest/comenius-maven-plugin</url>
     <licenses>
         <license>
             <name>Apache License, Version 2.0</name>
-            <url>http://www.apache.org/licenses/LICENSE-2.0</url>
+            <url>https://www.apache.org/licenses/LICENSE-2.0</url>
         </license>
     </licenses>
+
+    <developers>
+        <developer>
+            <id>novoj</id>
+            <name>Ing. Jan Novotny</name>
+            <email>novotny@fg.cz</email>
+            <organization>FG Forrest, a.s.</organization>
+            <organizationUrl>https://www.fg.cz</organizationUrl>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:git://github.com/FgForrest/comenius-maven-plugin.git</connection>
+        <developerConnection>scm:git:ssh://github.com:FgForrest/comenius-maven-plugin.git</developerConnection>
+        <url>https://github.com/FgForrest/comenius-maven-plugin</url>
+    </scm>
+
+    <distributionManagement>
+        <snapshotRepository>
+            <id>ossrh</id>
+            <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+        </snapshotRepository>
+        <repository>
+            <id>ossrh</id>
+            <url>https://ossrh-staging-api.central.sonatype.com/service/local/</url>
+        </repository>
+    </distributionManagement>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
@@ -195,6 +222,94 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
             </plugin>
+            <plugin>
+                <groupId>org.sonatype.plugins</groupId>
+                <artifactId>nexus-staging-maven-plugin</artifactId>
+                <version>1.7.0</version>
+                <extensions>true</extensions>
+                <configuration>
+                    <serverId>ossrh</serverId>
+                    <nexusUrl>https://ossrh-staging-api.central.sonatype.com/</nexusUrl>
+                    <autoReleaseAfterClose>true</autoReleaseAfterClose>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <version>3.3.1</version>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>jar-no-fork</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <version>3.12.0</version>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <doclint>none</doclint>
+                    <failOnError>false</failOnError>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-deploy-plugin</artifactId>
+                <version>3.1.4</version>
+                <executions>
+                    <execution>
+                        <id>default-deploy</id>
+                        <phase>deploy</phase>
+                        <goals>
+                            <goal>deploy</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>release-sign-artifacts</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>1.6</version>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                                <configuration>
+                                    <gpgArguments>
+                                        <arg>--pinentry-mode</arg>
+                                        <arg>loopback</arg>
+                                    </gpgArguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
 </project>
