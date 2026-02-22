@@ -147,14 +147,21 @@ public final class ContentChecker {
 		// Decode URL-encoded path components
 		final String decodedPath = decodeUrlPath(link.path());
 
+		// Strip query parameters (e.g., ?lang=java) — they are URL-level,
+		// not part of the filesystem path
+		final int queryIndex = decodedPath.indexOf('?');
+		final String fileSystemPath = queryIndex >= 0
+			? decodedPath.substring(0, queryIndex)
+			: decodedPath;
+
 		// Resolve the target path
 		final Path targetPath;
 		if (link.isAbsolute()) {
 			// Absolute path: resolve from Git root
 			// Remove leading slash and resolve from gitRoot
-			final String pathWithoutSlash = decodedPath.startsWith("/")
-				? decodedPath.substring(1)
-				: decodedPath;
+			final String pathWithoutSlash = fileSystemPath.startsWith("/")
+				? fileSystemPath.substring(1)
+				: fileSystemPath;
 			targetPath = this.gitRoot.resolve(pathWithoutSlash).normalize();
 		} else {
 			// Relative path: resolve from source file's parent directory
@@ -162,7 +169,7 @@ public final class ContentChecker {
 			if (sourceFileDir == null) {
 				return;
 			}
-			targetPath = sourceFileDir.resolve(decodedPath).normalize();
+			targetPath = sourceFileDir.resolve(fileSystemPath).normalize();
 		}
 
 		// Check if target file exists

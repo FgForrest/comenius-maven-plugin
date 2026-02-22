@@ -927,6 +927,325 @@ public class LinkCorrectorTest {
 			"PDF asset should point to source, got: " + result.correctedContent());
 	}
 
+	@Test
+	@DisplayName("repairs already-broken markdown link pointing to source directory")
+	public void shouldRepairBrokenMarkdownLinkPointingToSourceDir() throws Exception {
+		// Simulate the bug: translated file has link going through ../source/ instead of
+		// staying relative within the target directory structure
+		Files.createDirectories(this.sourceDir.resolve("get-started"));
+		Files.createDirectories(this.sourceDir.resolve("use/connectors"));
+		writeFile(this.sourceDir.resolve("use/connectors/java.md"),
+			"# Java\n[Run](../../get-started/run-evitadb?lang=java)");
+		writeFile(this.sourceDir.resolve("get-started/run-evitadb.md"), "# Run evitaDB");
+
+		Files.createDirectories(this.targetDir.resolve("use/connectors"));
+		final Path translatedFile = this.targetDir.resolve("use/connectors/java.md");
+		// The broken link goes ../../../source/get-started/run-evitadb?lang=java
+		// instead of staying ../../get-started/run-evitadb?lang=java
+		final String translatedContent =
+			"# Java\n[Spuštění](../../../source/get-started/run-evitadb?lang=java)";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertTrue(result.totalCorrections() > 0, "Should count the path correction");
+		assertTrue(result.correctedContent().contains("../../get-started/run-evitadb?lang=java"),
+			"Broken link should be repaired to correct relative path, got: " + result.correctedContent());
+		assertFalse(result.correctedContent().contains("../../../source/"),
+			"Broken link through source dir should be gone, got: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("leaves correct markdown link unchanged during repair")
+	public void shouldLeaveCorrectMarkdownLinkUnchangedDuringRepair() throws Exception {
+		// A link that is already correct should not be modified
+		Files.createDirectories(this.sourceDir.resolve("get-started"));
+		Files.createDirectories(this.sourceDir.resolve("use/connectors"));
+		writeFile(this.sourceDir.resolve("use/connectors/java.md"),
+			"# Java\n[Run](../../get-started/run-evitadb?lang=java)");
+		writeFile(this.sourceDir.resolve("get-started/run-evitadb.md"), "# Run evitaDB");
+
+		Files.createDirectories(this.targetDir.resolve("use/connectors"));
+		final Path translatedFile = this.targetDir.resolve("use/connectors/java.md");
+		// The link is already correct
+		final String translatedContent =
+			"# Java\n[Spuštění](../../get-started/run-evitadb?lang=java)";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(0, result.totalCorrections(), "No corrections needed for correct link");
+		assertEquals(translatedContent, result.correctedContent(),
+			"Content should be unchanged");
+	}
+
+	@Test
+	@DisplayName("autocorrects anchor to closest match when exact match fails")
+	public void shouldAutocorrectAnchorToClosestMatch() throws Exception {
+		// Source file with "Getting Started" heading
+		writeFile(this.sourceDir.resolve("guide.md"), """
+			# Introduction
+			## Getting Started
+			## Usage
+			""");
+
+		// Translated file links to "#gettin-started" (typo — missing 'g')
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent = """
+			# Introduccion
+
+			See [below](#gettin-started) for setup.
+
+			## Primeros Pasos
+			## Uso
+			""";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(1, result.anchorCorrections());
+		// The typo "gettin-started" should be fuzzy-matched to source's "getting-started"
+		// at index 1, then translated to "primeros-pasos" at index 1
+		assertTrue(result.correctedContent().contains("#primeros-pasos"),
+			"Expected autocorrected anchor, got: " + result.correctedContent());
+		assertFalse(result.correctedContent().contains("#gettin-started"),
+			"Original typo should be replaced, got: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("does not warn when anchor-only link already exists in translated file")
+	public void shouldNotWarnWhenAnchorAlreadyExistsInTranslatedFile() throws Exception {
+		// Source has English headings
+		writeFile(this.sourceDir.resolve("guide.md"), """
+			# Introduction
+			## Setup
+			## Usage
+			""");
+
+		// Translated file already has correct translated anchors in links
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent = """
+			# Introduccion
+
+			See [below](#configuracion) for setup.
+
+			## Configuracion
+			## Uso
+			""";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(0, result.anchorCorrections(),
+			"Already-correct translated anchor should not count as correction");
+		assertTrue(result.correctedContent().contains("#configuracion"),
+			"Anchor should remain unchanged, got: " + result.correctedContent());
+		Mockito.verify(this.mockLog, Mockito.never()).warn(Mockito.anyString());
+	}
+
+	@Test
+	@DisplayName("does not warn when cross-document anchor already translated")
+	public void shouldNotWarnWhenCrossDocumentAnchorAlreadyTranslated() throws Exception {
+		// Source files with English headings
+		writeFile(this.sourceDir.resolve("guide.md"), "# Guide\nSee [other](other.md#details)");
+		writeFile(this.sourceDir.resolve("other.md"), """
+			# Other Document
+			## Details
+			""");
+
+		// Translated target file has translated headings
+		writeFile(this.targetDir.resolve("other.md"), """
+			# Otro Documento
+			## Detalles
+			""");
+
+		// Translated file already links to the correct translated anchor
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent = "# Guía\nVea [otro](other.md#detalles)";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(0, result.anchorCorrections(),
+			"Already-correct translated anchor should not count as correction");
+		assertTrue(result.correctedContent().contains("other.md#detalles"),
+			"Anchor should remain unchanged, got: " + result.correctedContent());
+		Mockito.verify(this.mockLog, Mockito.never()).warn(Mockito.anyString());
+	}
+
+	@Test
+	@DisplayName("autocorrects via translated Levenshtein when anchor is in target language")
+	public void shouldAutocorrectViaTranslatedLevenshtein() throws Exception {
+		// Source has English headings
+		writeFile(this.sourceDir.resolve("guide.md"), """
+			# Introduction
+			## Cleaning Up the Mess
+			## Usage
+			""");
+
+		// Translated file has Czech headings
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		// Anchor "uklízení-nepořádku" is close to translated "úklid-nepořádku"
+		// (Levenshtein within threshold in same language)
+		// but nothing like English "cleaning-up-the-mess"
+		final String translatedContent = """
+			# Úvod
+
+			See [cleanup](#úklid-nepořádku).
+
+			## Úklid nepořádku
+			## Použití
+			""";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(
+			translatedFile, translatedContent
+		);
+
+		assertTrue(result.isSuccess());
+		// The anchor "úklid-nepořádku" should exact-match the translated heading
+		// "úklid-nepořádku" via Phase A (Levenshtein on translated index)
+		assertEquals(0, result.anchorCorrections(),
+			"Exact match in translated index, no correction needed");
+		assertTrue(result.correctedContent().contains("#úklid-nepořádku"),
+			"Anchor should be preserved, got: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("autocorrects via token overlap when anchor shares tokens with translated heading")
+	public void shouldAutocorrectViaTokenOverlap() throws Exception {
+		// Source has English headings
+		writeFile(this.sourceDir.resolve("guide.md"), """
+			# Introduction
+			## Recommended Development Environments IDE
+			## Usage
+			""");
+
+		// Translated file has Czech headings
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		// Link uses truncated Czech anchor "doporučená-ide"
+		// Full translated heading anchor is "doporučená-vývojová-prostředí-ide"
+		// Token overlap: both share "doporučená" and "ide" → 2/2 match
+		final String translatedContent = """
+			# Úvod
+
+			See [IDE](#doporučená-ide).
+
+			## Doporučená vývojová prostředí IDE
+			## Použití
+			""";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(
+			translatedFile, translatedContent
+		);
+
+		assertTrue(result.isSuccess());
+		assertEquals(1, result.anchorCorrections());
+		assertTrue(result.correctedContent().contains(
+			"#doporučená-vývojová-prostředí-ide"),
+			"Expected token-overlap autocorrected anchor, got: "
+				+ result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("includes linking file name in warning message")
+	public void shouldIncludeLinkingFileInWarningMessage() throws Exception {
+		// Source has English headings
+		writeFile(this.sourceDir.resolve("guide.md"), """
+			# Introduction
+			## Setup
+			""");
+
+		// Translated file with completely unrecognizable anchor
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent = """
+			# Úvod
+
+			See [xyz](#xyz-abc-completely-unknown).
+
+			## Nastavení
+			""";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		corrector.correctLinks(translatedFile, translatedContent);
+
+		// Verify warning includes the linking file name
+		Mockito.verify(this.mockLog).warn(Mockito.argThat(
+			(String msg) -> msg.contains("guide.md")
+				&& msg.contains("xyz-abc-completely-unknown")
+		));
+	}
+
 	private void writeFile(Path path, String content) throws IOException {
 		Files.createDirectories(path.getParent());
 		Files.write(path, content.getBytes(StandardCharsets.UTF_8));

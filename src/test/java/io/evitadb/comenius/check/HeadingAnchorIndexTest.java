@@ -10,6 +10,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 @DisplayName("HeadingAnchorIndex maintains ordered heading anchors for index-based lookup")
 public class HeadingAnchorIndexTest {
@@ -213,6 +214,123 @@ public class HeadingAnchorIndexTest {
 			"installation",
 			"usage"
 		), index.getAnchors());
+	}
+
+	@Test
+	@DisplayName("finds closest anchor with typo via fuzzy matching")
+	public void shouldFindClosestAnchorWithTypo() {
+		final String markdown = "# Getting Started\n\n## Installation\n\n## Usage";
+		final MarkdownDocument doc = new MarkdownDocument(markdown);
+		final HeadingAnchorIndex index = HeadingAnchorIndex.fromDocument(doc.getDocument());
+
+		// "gettin-started" is 1 edit away from "getting-started"
+		final Optional<Integer> result = index.findClosest("gettin-started");
+		assertTrue(result.isPresent());
+		assertEquals(0, result.get());
+		assertEquals("getting-started", index.getAnchor(result.get()));
+	}
+
+	@Test
+	@DisplayName("finds closest anchor with missing hyphen via fuzzy matching")
+	public void shouldFindClosestAnchorWithMissingHyphen() {
+		final String markdown = "# Getting Started\n\n## Installation\n\n## Usage";
+		final MarkdownDocument doc = new MarkdownDocument(markdown);
+		final HeadingAnchorIndex index = HeadingAnchorIndex.fromDocument(doc.getDocument());
+
+		// "gettingstarted" is 1 edit away from "getting-started"
+		final Optional<Integer> result = index.findClosest("gettingstarted");
+		assertTrue(result.isPresent());
+		assertEquals(0, result.get());
+		assertEquals("getting-started", index.getAnchor(result.get()));
+	}
+
+	@Test
+	@DisplayName("returns empty for completely different anchor via fuzzy matching")
+	public void shouldReturnEmptyForCompletelyDifferentAnchor() {
+		final String markdown = "# Getting Started\n\n## Installation\n\n## Usage";
+		final MarkdownDocument doc = new MarkdownDocument(markdown);
+		final HeadingAnchorIndex index = HeadingAnchorIndex.fromDocument(doc.getDocument());
+
+		final Optional<Integer> result = index.findClosest("xyz-abc");
+		assertFalse(result.isPresent());
+	}
+
+	@Test
+	@DisplayName("returns empty when index is empty via fuzzy matching")
+	public void shouldReturnEmptyWhenIndexIsEmpty() {
+		final String markdown = "Just text, no headings.";
+		final MarkdownDocument doc = new MarkdownDocument(markdown);
+		final HeadingAnchorIndex index = HeadingAnchorIndex.fromDocument(doc.getDocument());
+
+		final Optional<Integer> result = index.findClosest("anything");
+		assertFalse(result.isPresent());
+	}
+
+	@Test
+	@DisplayName("finds closest by token overlap with shared tokens")
+	public void shouldFindClosestByTokenOverlapWithSharedTokens() {
+		// "doporučená-vývojová-prostředí-ide" contains tokens "doporučená" and "ide"
+		final String markdown = """
+			# Introduction
+			## Doporučená vývojová prostředí IDE
+			## Other Section
+			""";
+		final MarkdownDocument doc = new MarkdownDocument(markdown);
+		final HeadingAnchorIndex index = HeadingAnchorIndex.fromDocument(doc.getDocument());
+
+		// Query "doporučená-ide" has 2 tokens, both present in candidate → 2/2 ≥ 2 → match
+		final Optional<Integer> result = index.findClosestByTokenOverlap("doporučená-ide");
+		assertTrue(result.isPresent());
+		assertEquals(1, result.get());
+	}
+
+	@Test
+	@DisplayName("does not match by token overlap with single shared token")
+	public void shouldNotMatchByTokenOverlapWithSingleSharedToken() {
+		final String markdown = """
+			# Data Types
+			## Configuration
+			""";
+		final MarkdownDocument doc = new MarkdownDocument(markdown);
+		final HeadingAnchorIndex index = HeadingAnchorIndex.fromDocument(doc.getDocument());
+
+		// "data-model" shares only "data" with "data-types" → 1/2 < 2 → no match
+		final Optional<Integer> result = index.findClosestByTokenOverlap("data-model");
+		assertFalse(result.isPresent());
+	}
+
+	@Test
+	@DisplayName("requires minimum two tokens for token overlap")
+	public void shouldRequireMinimumTwoTokensForTokenOverlap() {
+		final String markdown = """
+			# Setup
+			## Installation
+			""";
+		final MarkdownDocument doc = new MarkdownDocument(markdown);
+		final HeadingAnchorIndex index = HeadingAnchorIndex.fromDocument(doc.getDocument());
+
+		// Single-token query "setup" → skip (need ≥ 2 tokens)
+		final Optional<Integer> result = index.findClosestByTokenOverlap("setup");
+		assertFalse(result.isPresent());
+	}
+
+	@Test
+	@DisplayName("matches three-token anchor with one token missing")
+	public void shouldMatchThreeTokenAnchorWithOneTokenMissing() {
+		final String markdown = """
+			# Introduction
+			## Popis modelu
+			## Other
+			""";
+		final MarkdownDocument doc = new MarkdownDocument(markdown);
+		final HeadingAnchorIndex index = HeadingAnchorIndex.fromDocument(doc.getDocument());
+
+		// Query "popis-datového-modelu" has 3 tokens, candidate "popis-modelu" has
+		// "popis" and "modelu" → 2/3 ≥ 2 (max(2, 3-1)=2) → match
+		final Optional<Integer> result =
+			index.findClosestByTokenOverlap("popis-datového-modelu");
+		assertTrue(result.isPresent());
+		assertEquals(1, result.get());
 	}
 
 	@Test

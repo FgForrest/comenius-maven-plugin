@@ -1,8 +1,10 @@
 package io.evitadb.comenius;
 
 import dev.langchain4j.model.chat.ChatModel;
+import io.evitadb.comenius.check.AnchorChangeSet;
 import io.evitadb.comenius.check.CheckResult;
 import io.evitadb.comenius.check.ContentChecker;
+import io.evitadb.comenius.check.ExternalLinkCorrector;
 import io.evitadb.comenius.check.GitError;
 import io.evitadb.comenius.check.LinkCorrector;
 import io.evitadb.comenius.check.LinkCorrectionResult;
@@ -358,6 +360,15 @@ public class ComeniusMojo extends AbstractMojo {
 							log, root, targetDir, pattern, exclusionPatterns,
 							translatedFiles, gitService, gitRoot, executor.getExecutor()
 						);
+
+						// External anchor correction phase
+						final Map<Path, AnchorChangeSet> anchorChanges = executor.getAnchorChanges();
+						if (!anchorChanges.isEmpty()) {
+							correctExternalAnchors(
+								log, targetDir, pattern, exclusionPatterns,
+								anchorChanges, translatedFiles, executor.getExecutor()
+							);
+						}
 					}
 				}
 			}
@@ -610,6 +621,71 @@ public class ComeniusMojo extends AbstractMojo {
 
 		// Validation phase
 		validateCorrectedLinks(log, targetDir, results, gitService, gitRoot);
+	}
+
+	/**
+	 * Corrects anchor references in external translated files that point to
+	 * re-translated documents whose headings have changed.
+	 *
+	 * Scans all markdown files in the target directory (excluding just-translated ones)
+	 * and fixes stale anchor references using the anchor change data collected
+	 * during translation.
+	 *
+	 * @param log               Maven log
+	 * @param targetDir         target directory containing translated files
+	 * @param filePattern       regex pattern to match markdown files
+	 * @param exclusionPatterns patterns for files to exclude
+	 * @param anchorChanges     map of target file path to AnchorChangeSet
+	 * @param justTranslated    set of files that were just translated (excluded from scanning)
+	 * @param executor          executor for parallel processing
+	 */
+	private void correctExternalAnchors(
+		@Nonnull Log log,
+		@Nonnull Path targetDir,
+		@Nonnull Pattern filePattern,
+		@Nullable List<Pattern> exclusionPatterns,
+		@Nonnull Map<Path, AnchorChangeSet> anchorChanges,
+		@Nonnull Set<Path> justTranslated,
+		@Nonnull Executor executor
+	) {
+		log.info("--- External Anchor Correction Phase ---");
+		log.info("Files with changed anchors: " + anchorChanges.size());
+
+		// Collect all markdown files in target directory except just-translated ones
+		final Map<Path, String> externalFiles = new HashMap<>();
+		final Visitor collectingVisitor = (file, content, instructions) -> {
+			final Path normalizedFile = file.toAbsolutePath().normalize();
+			if (!justTranslated.contains(normalizedFile)) {
+				externalFiles.put(normalizedFile, content);
+			}
+		};
+
+		try {
+			final Traverser traverser = new Traverser(
+				targetDir, filePattern, exclusionPatterns, collectingVisitor
+			);
+			traverser.traverse();
+		} catch (IOException e) {
+			log.error("Failed to traverse target directory for anchor correction: " + e.getMessage());
+			return;
+		}
+
+		if (externalFiles.isEmpty()) {
+			log.info("No external files to check for anchor corrections");
+			return;
+		}
+
+		log.info("Scanning " + externalFiles.size() + " external files for stale anchors");
+
+		final ExternalLinkCorrector corrector = new ExternalLinkCorrector(
+			targetDir, this.translatableFrontMatterFields, log
+		);
+		final List<LinkCorrectionResult> results = corrector.correctAllParallel(
+			anchorChanges, externalFiles, executor
+		);
+
+		// Write corrected files using existing infrastructure
+		writeCorrectedFiles(log, results);
 	}
 
 	/**

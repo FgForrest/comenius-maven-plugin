@@ -1,9 +1,12 @@
 package io.evitadb.comenius;
 
 import dev.langchain4j.exception.NonRetriableException;
+import io.evitadb.comenius.check.AnchorChangeSet;
+import io.evitadb.comenius.check.HeadingAnchorIndex;
 import io.evitadb.comenius.llm.LlmClient;
 import io.evitadb.comenius.model.FrontMatterTranslationHelper;
 import io.evitadb.comenius.model.MarkdownDocument;
+import io.evitadb.comenius.model.TranslateIncrementalJob;
 import io.evitadb.comenius.model.TranslationJob;
 import io.evitadb.comenius.model.TranslationResult;
 import io.evitadb.comenius.model.TranslationSummary;
@@ -78,6 +81,14 @@ public final class TranslationExecutor {
 	 */
 	@Nullable
 	private Map<String, String> customFrontMatter;
+	/**
+	 * Tracks anchor changes for successfully translated files.
+	 * Key is the absolute normalized target file path.
+	 * Only populated for new translations (always) and incremental translations
+	 * where headings actually changed.
+	 */
+	@Nonnull
+	private final Map<Path, AnchorChangeSet> anchorChanges = new ConcurrentHashMap<>();
 
 	/**
 	 * Creates a translation executor using an existing ForkJoinPool.
@@ -150,7 +161,7 @@ public final class TranslationExecutor {
 	 *
 	 * @param customFrontMatter map of property names to values, or null for none
 	 */
-	public void setCustomFrontMatter(@Nullable Map<String, String> customFrontMatter) {
+	public void setCustomFrontMatter(@Nullable final Map<String, String> customFrontMatter) {
 		this.customFrontMatter = customFrontMatter;
 	}
 
@@ -178,6 +189,7 @@ public final class TranslationExecutor {
 		this.completedJobs.set(0);
 		this.shutdownRequested.set(false);
 		this.permanentFailureCause = null;
+		this.anchorChanges.clear();
 
 		// Submit all jobs with result processing chained - allows early GC of content
 		final List<CompletableFuture<TranslationSummary>> futures = new ArrayList<>(jobs.size());
@@ -387,6 +399,9 @@ public final class TranslationExecutor {
 		// Create document from translated body content (empty properties initially)
 		final MarkdownDocument doc = new MarkdownDocument(bodyContent);
 
+		// Track anchor changes for cross-document correction
+		trackAnchorChanges(job, doc);
+
 		// Copy ALL properties from source (preserves order and non-translatable fields)
 		doc.mergeFrontMatterProperties(sourceDoc.getProperties());
 
@@ -406,6 +421,48 @@ public final class TranslationExecutor {
 		doc.setProperty("commit", job.getCurrentCommit());
 
 		this.writer.write(doc, job.getTargetFile());
+	}
+
+	/**
+	 * Tracks anchor changes between old and new translations for cross-document
+	 * anchor correction. For incremental translations, compares old and new heading
+	 * indices and only records if they differ. For new translations, always records
+	 * since we cannot determine if anchors changed.
+	 *
+	 * @param job the translation job
+	 * @param doc the new translated document
+	 */
+	private void trackAnchorChanges(
+		@Nonnull TranslationJob job,
+		@Nonnull MarkdownDocument doc
+	) {
+		final HeadingAnchorIndex newAnchorIndex = HeadingAnchorIndex.fromDocument(
+			doc.getDocument()
+		);
+
+		if (job instanceof TranslateIncrementalJob incrementalJob) {
+			final MarkdownDocument existingDoc = new MarkdownDocument(
+				incrementalJob.getExistingTranslation()
+			);
+			final HeadingAnchorIndex oldAnchorIndex = HeadingAnchorIndex.fromDocument(
+				existingDoc.getDocument()
+			);
+			final AnchorChangeSet changeSet = new AnchorChangeSet(
+				oldAnchorIndex, newAnchorIndex
+			);
+			if (changeSet.hasChanges()) {
+				this.anchorChanges.put(
+					job.getTargetFile().toAbsolutePath().normalize(),
+					changeSet
+				);
+			}
+		} else {
+			// Full translation — always record (no old anchors available)
+			this.anchorChanges.put(
+				job.getTargetFile().toAbsolutePath().normalize(),
+				new AnchorChangeSet(newAnchorIndex)
+			);
+		}
 	}
 
 	/**
@@ -502,5 +559,18 @@ public final class TranslationExecutor {
 	@Nullable
 	public NonRetriableException getPermanentFailureCause() {
 		return this.permanentFailureCause;
+	}
+
+	/**
+	 * Returns the anchor changes detected during translation.
+	 * Maps target file paths to their {@link AnchorChangeSet}s.
+	 * Only includes files where anchors actually changed (for incremental)
+	 * or all new translations (where change status is unknown).
+	 *
+	 * @return immutable copy of anchor changes
+	 */
+	@Nonnull
+	public Map<Path, AnchorChangeSet> getAnchorChanges() {
+		return Map.copyOf(this.anchorChanges);
 	}
 }

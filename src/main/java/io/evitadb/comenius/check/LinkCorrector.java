@@ -323,10 +323,13 @@ public final class LinkCorrector {
 				context.sourceFile,
 				context.translatedContent,
 				context.translatedFile,
-				anchor
+				anchor,
+				context.translatedFile
 			);
 			if (translatedAnchor != null) {
-				context.anchorCorrections++;
+				if (!translatedAnchor.equals(anchor)) {
+					context.anchorCorrections++;
+				}
 				return "#" + translatedAnchor;
 			}
 		} catch (LinkCorrectionException e) {
@@ -398,10 +401,11 @@ public final class LinkCorrector {
 
 	/**
 	 * Corrects a link to another translated markdown file.
-	 * The path stays the same (same relative structure), but anchors need translation.
+	 * Recalculates the correct relative path from the translated file to the
+	 * translated target (repairs broken links), and translates anchors by position.
 	 *
 	 * @param linkInfo      the parsed link info
-	 * @param sourceTarget  the resolved source file being linked to
+	 * @param sourceTarget  the resolved source file being linked to (with .md extension)
 	 * @param context       the correction context
 	 * @return the corrected link
 	 */
@@ -411,40 +415,70 @@ public final class LinkCorrector {
 		@Nonnull Path sourceTarget,
 		@Nonnull CorrectionContext context
 	) {
-		final String anchor = linkInfo.anchor();
-		if (anchor == null || anchor.isEmpty()) {
-			// No anchor to correct
-			return linkInfo.destination();
-		}
-
 		// Calculate the translated version of the target file
 		final Path relativePath = this.sourceDir.relativize(sourceTarget);
 		final Path translatedTarget = this.targetDir.resolve(relativePath).normalize();
 
-		try {
-			// Read the translated target content
-			if (Files.exists(translatedTarget)) {
-				final String translatedTargetContent = Files.readString(
-					translatedTarget, StandardCharsets.UTF_8
-				);
-				final String translatedAnchor = translateAnchor(
-					sourceTarget,
-					translatedTargetContent,
-					translatedTarget,
-					anchor
-				);
-				if (translatedAnchor != null) {
-					context.anchorCorrections++;
-					return linkInfo.path() + "#" + translatedAnchor;
-				}
-			}
-		} catch (LinkCorrectionException e) {
-			context.errors.add(e.getMessage());
-		} catch (IOException e) {
-			this.log.warn("Failed to read translated target file: " + e.getMessage());
+		// Calculate the correct relative path from translated file to translated target
+		final Path translatedFileDir = context.translatedFile.getParent();
+		String correctPath = translatedFileDir.relativize(translatedTarget)
+			.toString().replace('\\', '/');
+
+		// Extract query string from the original path (e.g., "?lang=java")
+		final String originalPath = linkInfo.path();
+		final int queryIdx = originalPath.indexOf('?');
+		final String originalPathWithoutQuery = queryIdx >= 0
+			? originalPath.substring(0, queryIdx)
+			: originalPath;
+		final String queryString = queryIdx >= 0
+			? originalPath.substring(queryIdx)
+			: "";
+
+		// Strip .md from calculated path if original link was extensionless
+		if (!originalPathWithoutQuery.endsWith(".md") && correctPath.endsWith(".md")) {
+			correctPath = correctPath.substring(0, correctPath.length() - 3);
 		}
 
-		return linkInfo.destination();
+		// Track path correction if the path changed
+		final boolean pathChanged = !correctPath.equals(originalPathWithoutQuery);
+		if (pathChanged) {
+			context.assetCorrections++;
+		}
+
+		// Handle anchor translation
+		final String anchor = linkInfo.anchor();
+		if (anchor != null && !anchor.isEmpty()) {
+			try {
+				if (Files.exists(translatedTarget)) {
+					final String translatedTargetContent = Files.readString(
+						translatedTarget, StandardCharsets.UTF_8
+					);
+					final String translatedAnchor = translateAnchor(
+						sourceTarget,
+						translatedTargetContent,
+						translatedTarget,
+						anchor,
+						context.translatedFile
+					);
+					if (translatedAnchor != null) {
+						if (!translatedAnchor.equals(anchor)) {
+							context.anchorCorrections++;
+						}
+						return correctPath + queryString + "#" + translatedAnchor;
+					}
+				}
+			} catch (LinkCorrectionException e) {
+				context.errors.add(e.getMessage());
+			} catch (IOException e) {
+				this.log.warn("Failed to read translated target file: " + e.getMessage());
+			}
+
+			// Anchor translation failed — return path with original anchor
+			return correctPath + queryString + "#" + anchor;
+		}
+
+		// No anchor — return corrected path with query string
+		return correctPath + queryString;
 	}
 
 	/**
@@ -486,12 +520,20 @@ public final class LinkCorrector {
 	}
 
 	/**
-	 * Translates an anchor from source document to translated document by index.
+	 * Translates an anchor using two same-language matching phases.
+	 *
+	 * **Phase A** matches the anchor against the **translated** heading index
+	 * (target-language comparisons: exact, Levenshtein, token overlap).
+	 *
+	 * **Phase B** matches the anchor against the **source** heading index
+	 * (source-language comparisons: exact, Levenshtein), then position-maps
+	 * the result to the translated index.
 	 *
 	 * @param sourceFile        the source markdown file
 	 * @param translatedContent the translated content
 	 * @param translatedFile    the translated file (for error reporting)
 	 * @param anchor            the anchor to translate
+	 * @param linkingFile       the file containing the link (for warning context)
 	 * @return the translated anchor, or null if anchor not found
 	 * @throws LinkCorrectionException if heading count mismatch
 	 * @throws IOException             if reading source file fails
@@ -501,18 +543,52 @@ public final class LinkCorrector {
 		@Nonnull Path sourceFile,
 		@Nonnull String translatedContent,
 		@Nonnull Path translatedFile,
-		@Nonnull String anchor
+		@Nonnull String anchor,
+		@Nonnull Path linkingFile
 	) throws LinkCorrectionException, IOException {
-		// Get source heading index (cached)
-		final HeadingAnchorIndex sourceIndex = getSourceAnchorIndex(sourceFile);
-
 		// Build translated heading index
 		final MarkdownDocument translatedDoc = new MarkdownDocument(translatedContent);
 		final HeadingAnchorIndex translatedIndex = HeadingAnchorIndex.fromDocument(
 			translatedDoc.getDocument()
 		);
 
-		// Validate heading counts match
+		// === Phase A: anchor may be in TARGET language ===
+		// All comparisons are same-language (target vs target)
+
+		// A1: Exact match in translated index
+		if (translatedIndex.indexOf(anchor).isPresent()) {
+			return anchor;
+		}
+
+		// A2: Levenshtein against translated index (same language)
+		final Optional<Integer> translatedFuzzy = translatedIndex.findClosest(anchor);
+		if (translatedFuzzy.isPresent()) {
+			final String match = translatedIndex.getAnchor(translatedFuzzy.get());
+			this.log.info("Anchor '#" + anchor + "' in "
+				+ linkingFile.getFileName()
+				+ " autocorrected to '#" + match + "' in "
+				+ translatedFile.getFileName());
+			return match;
+		}
+
+		// A3: Token overlap against translated index (same language)
+		final Optional<Integer> translatedToken =
+			translatedIndex.findClosestByTokenOverlap(anchor);
+		if (translatedToken.isPresent()) {
+			final String match = translatedIndex.getAnchor(translatedToken.get());
+			this.log.info("Anchor '#" + anchor + "' in "
+				+ linkingFile.getFileName()
+				+ " autocorrected to '#" + match + "' in "
+				+ translatedFile.getFileName() + " (token match)");
+			return match;
+		}
+
+		// === Phase B: anchor may be in SOURCE language ===
+		// All comparisons are same-language (source vs source)
+		// Requires position mapping: source index → translated index
+
+		final HeadingAnchorIndex sourceIndex = getSourceAnchorIndex(sourceFile);
+
 		if (sourceIndex.size() != translatedIndex.size()) {
 			throw new LinkCorrectionException(
 				sourceFile,
@@ -522,15 +598,28 @@ public final class LinkCorrector {
 			);
 		}
 
-		// Find anchor index in source
-		final Optional<Integer> indexOpt = sourceIndex.indexOf(anchor);
+		// B1: Exact match in source index
+		Optional<Integer> indexOpt = sourceIndex.indexOf(anchor);
 		if (indexOpt.isEmpty()) {
-			// Anchor not found in source - might be an invalid link
-			this.log.debug("Anchor not found in source: " + anchor);
-			return null;
+			// B2: Levenshtein against source index (same language)
+			indexOpt = sourceIndex.findClosest(anchor);
+			if (indexOpt.isPresent()) {
+				final String closestAnchor = sourceIndex.getAnchor(indexOpt.get());
+				this.log.warn("Anchor '#" + anchor + "' in "
+					+ linkingFile.getFileName()
+					+ " not found, autocorrected to '#" + closestAnchor
+					+ "' in " + sourceFile.getFileName());
+			} else {
+				this.log.warn("Anchor '#" + anchor + "' in "
+					+ linkingFile.getFileName()
+					+ " not found in " + sourceFile.getFileName()
+					+ " or " + translatedFile.getFileName()
+					+ ", no similar anchor available");
+				return null;
+			}
 		}
 
-		// Return anchor at same index in translated document
+		// Position-map: source position → translated anchor
 		return translatedIndex.getAnchor(indexOpt.get());
 	}
 

@@ -367,6 +367,65 @@ public class ContentCheckerTest {
 	}
 
 	@Test
+	@DisplayName("passes for links with query parameters to existing files")
+	public void shouldPassForLinksWithQueryParameters() throws Exception {
+		final Path source = writeFile(
+			"docs/sub/source.md",
+			"See [run](../../get-started/run-evitadb.md?lang=java)."
+		);
+		writeFile("get-started/run-evitadb.md", "# Run evitaDB");
+		runGit("add", ".");
+		runGit("commit", "-m", "Add files");
+
+		this.checker.checkFile(
+			source, "See [run](../../get-started/run-evitadb.md?lang=java)."
+		);
+
+		final CheckResult result = this.checker.getResult();
+		assertTrue(result.linkErrors().isEmpty(),
+			"Should strip query parameters before checking file existence");
+	}
+
+	@Test
+	@DisplayName("passes for links with query parameters and anchor")
+	public void shouldPassForLinksWithQueryParametersAndAnchor() throws Exception {
+		final Path source = writeFile(
+			"docs/source.md",
+			"See [section](other.md?lang=java#details)."
+		);
+		writeFile("docs/other.md", "# Other\n\n## Details\n\nInfo.");
+		runGit("add", ".");
+		runGit("commit", "-m", "Add files");
+
+		this.checker.checkFile(
+			source, "See [section](other.md?lang=java#details)."
+		);
+
+		final CheckResult result = this.checker.getResult();
+		assertTrue(result.linkErrors().isEmpty(),
+			"Should strip query parameters and validate anchor correctly");
+	}
+
+	@Test
+	@DisplayName("passes for absolute links with query parameters")
+	public void shouldPassForAbsoluteLinksWithQueryParameters() throws Exception {
+		final Path source = writeFile(
+			"docs/source.md", "See [run](/get-started/run.md?lang=java)."
+		);
+		writeFile("get-started/run.md", "# Run");
+		runGit("add", ".");
+		runGit("commit", "-m", "Add files");
+
+		this.checker.checkFile(
+			source, "See [run](/get-started/run.md?lang=java)."
+		);
+
+		final CheckResult result = this.checker.getResult();
+		assertTrue(result.linkErrors().isEmpty(),
+			"Should strip query parameters from absolute links");
+	}
+
+	@Test
 	@DisplayName("combines git and link errors in result")
 	public void shouldCombineGitAndLinkErrorsInResult() throws Exception {
 		// Create initial commit
