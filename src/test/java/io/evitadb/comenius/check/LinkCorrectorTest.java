@@ -793,6 +793,140 @@ public class LinkCorrectorTest {
 			"Expected date field preserved");
 	}
 
+	@Test
+	@DisplayName("keeps extensionless markdown link relative when .md file exists in source")
+	public void shouldKeepExtensionlessMarkdownLinkRelative() throws Exception {
+		// Source has other-doc.md but link references it without .md extension
+		writeFile(this.sourceDir.resolve("guide.md"), "# Guide\n[other](other-doc)");
+		writeFile(this.sourceDir.resolve("other-doc.md"), "# Other Doc");
+
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent = "# Guía\n[otro](other-doc)";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(0, result.assetCorrections(), "Extensionless markdown link should not be treated as asset");
+		assertTrue(result.correctedContent().contains("[otro](other-doc)"),
+			"Link should remain relative, got: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("keeps markdown link with query params relative when .md file exists")
+	public void shouldKeepMarkdownLinkWithQueryParamsRelative() throws Exception {
+		// Source has run-evitadb.md but link uses ?lang=java (no .md extension)
+		Files.createDirectories(this.sourceDir.resolve("get-started"));
+		Files.createDirectories(this.sourceDir.resolve("use/connectors"));
+		writeFile(this.sourceDir.resolve("use/connectors/java.md"),
+			"# Java\n[Run](../../get-started/run-evitadb?lang=java)");
+		writeFile(this.sourceDir.resolve("get-started/run-evitadb.md"), "# Run evitaDB");
+
+		Files.createDirectories(this.targetDir.resolve("use/connectors"));
+		final Path translatedFile = this.targetDir.resolve("use/connectors/java.md");
+		final String translatedContent = "# Java\n[Spuštění](../../get-started/run-evitadb?lang=java)";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(0, result.assetCorrections(),
+			"Link with query params to markdown file should not be treated as asset");
+		assertTrue(result.correctedContent().contains("../../get-started/run-evitadb?lang=java"),
+			"Link should remain relative with query params, got: " + result.correctedContent());
+		assertFalse(result.correctedContent().contains("/source/"),
+			"Link should NOT point to source directory, got: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("translates anchor in extensionless markdown link with query params")
+	public void shouldTranslateAnchorInExtensionlessMarkdownLinkWithQueryParams() throws Exception {
+		Files.createDirectories(this.sourceDir.resolve("get-started"));
+		Files.createDirectories(this.sourceDir.resolve("use/connectors"));
+		writeFile(this.sourceDir.resolve("use/connectors/java.md"),
+			"# Java\n[Create DB](../../get-started/create-db?lang=java#open-session)");
+		writeFile(this.sourceDir.resolve("get-started/create-db.md"),
+			"# Create Database\n## Open Session");
+
+		Files.createDirectories(this.targetDir.resolve("use/connectors"));
+		Files.createDirectories(this.targetDir.resolve("get-started"));
+		writeFile(this.targetDir.resolve("get-started/create-db.md"),
+			"# Vytvoreni Databaze\n## Otevreni Relace");
+
+		final Path translatedFile = this.targetDir.resolve("use/connectors/java.md");
+		final String translatedContent =
+			"# Java\n[Vytvorit DB](../../get-started/create-db?lang=java#open-session)";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(0, result.assetCorrections());
+		assertEquals(1, result.anchorCorrections());
+		assertTrue(result.correctedContent().contains(
+			"../../get-started/create-db?lang=java#otevreni-relace"),
+			"Expected translated anchor with preserved query params, got: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("still corrects actual asset links after extensionless fix")
+	public void shouldStillCorrectActualAssetLinksAfterExtensionlessFix() throws Exception {
+		// Ensure assets (.png, .pdf, etc.) are still recalculated correctly
+		Files.createDirectories(this.sourceDir.resolve("docs"));
+		Files.createDirectories(this.sourceDir.resolve("docs/assets"));
+		writeFile(this.sourceDir.resolve("docs/guide.md"),
+			"# Guide\n![img](assets/logo.png)\n[pdf](assets/manual.pdf)");
+		writeFile(this.sourceDir.resolve("docs/assets/logo.png"), "PNG");
+		writeFile(this.sourceDir.resolve("docs/assets/manual.pdf"), "PDF");
+
+		Files.createDirectories(this.targetDir.resolve("docs"));
+		final Path translatedFile = this.targetDir.resolve("docs/guide.md");
+		final String translatedContent =
+			"# Guía\n![img](assets/logo.png)\n[pdf](assets/manual.pdf)";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(2, result.assetCorrections(), "Both assets should be corrected");
+		assertTrue(result.correctedContent().contains("source/docs/assets/logo.png"),
+			"PNG asset should point to source, got: " + result.correctedContent());
+		assertTrue(result.correctedContent().contains("source/docs/assets/manual.pdf"),
+			"PDF asset should point to source, got: " + result.correctedContent());
+	}
+
 	private void writeFile(Path path, String content) throws IOException {
 		Files.createDirectories(path.getParent());
 		Files.write(path, content.getBytes(StandardCharsets.UTF_8));

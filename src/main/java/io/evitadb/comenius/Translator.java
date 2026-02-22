@@ -23,6 +23,7 @@ import io.evitadb.comenius.model.TranslateIncrementalJob;
 import io.evitadb.comenius.model.TranslateNewJob;
 import io.evitadb.comenius.model.TranslationJob;
 import io.evitadb.comenius.model.TranslationResult;
+import org.apache.maven.plugin.logging.Log;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -60,10 +61,35 @@ public class Translator {
 	private final PromptLoader promptLoader;
 	@Nullable
 	private final Executor executor;
+	@Nullable
+	private final Log log;
 	@Nonnull
 	private final DocumentSplitter documentSplitter;
 	private final AtomicLong inputTokenCount = new AtomicLong(0);
 	private final AtomicLong outputTokenCount = new AtomicLong(0);
+
+	/**
+	 * Create a Translator using provided LlmClient, PromptLoader, Executor, and Maven Log.
+	 * The LlmClient handles permanent failure detection.
+	 * The executor is used for async operations; if null, ForkJoinPool.commonPool() is used.
+	 *
+	 * @param llmClient    non-null LLM client to use
+	 * @param promptLoader non-null prompt loader for loading templates
+	 * @param executor     executor for async operations; may be null to use common pool
+	 * @param log          Maven log for diagnostic messages; may be null
+	 */
+	public Translator(
+		@Nonnull LlmClient llmClient,
+		@Nonnull PromptLoader promptLoader,
+		@Nullable Executor executor,
+		@Nullable Log log
+	) {
+		this.llmClient = Objects.requireNonNull(llmClient, "llmClient must not be null");
+		this.promptLoader = Objects.requireNonNull(promptLoader, "promptLoader must not be null");
+		this.executor = executor;
+		this.log = log;
+		this.documentSplitter = new DocumentSplitter();
+	}
 
 	/**
 	 * Create a Translator using provided LlmClient, PromptLoader, and Executor.
@@ -79,10 +105,7 @@ public class Translator {
 		@Nonnull PromptLoader promptLoader,
 		@Nullable Executor executor
 	) {
-		this.llmClient = Objects.requireNonNull(llmClient, "llmClient must not be null");
-		this.promptLoader = Objects.requireNonNull(promptLoader, "promptLoader must not be null");
-		this.executor = executor;
-		this.documentSplitter = new DocumentSplitter();
+		this(llmClient, promptLoader, executor, null);
 	}
 
 	/**
@@ -545,6 +568,29 @@ public class Translator {
 		final List<DocumentSection> newSections = DocumentSectionSplitter.split(newSourceDoc.getBodyContent());
 		final List<DocumentSection> translationSections = DocumentSectionSplitter.split(existingTranslationBody);
 
+		// Verify that old source and existing translation have matching heading structures.
+		// Compare only heading sections (not intros) — intro presence may legitimately differ
+		// (e.g., translation has a "TODO" note before the first heading).
+		// If heading structures don't match (e.g., translation was created before heading
+		// validation existed, or the LLM added/removed headings during original translation),
+		// section-based mapping is unreliable — fall back to full retranslation.
+		final List<DocumentSection> oldHeadings = oldSections.stream()
+			.filter(s -> !s.isIntro()).toList();
+		final List<DocumentSection> translationHeadings = translationSections.stream()
+			.filter(s -> !s.isIntro()).toList();
+		try {
+			DocumentSectionSplitter.validateHeadingStructure(oldHeadings, translationHeadings);
+		} catch (HeadingStructureMismatchException e) {
+			if (this.log != null) {
+				this.log.warn(
+					"Heading structure mismatch between old source and existing translation" +
+					" for " + job.getSourceFile() + ": " + e.getMessage() +
+					" — falling back to full retranslation."
+				);
+			}
+			return translateFullBodyFallback(currentResult, job, executor);
+		}
+
 		// Align old ↔ new sections
 		final List<SectionAlignment> alignments = SectionAligner.align(oldSections, newSections);
 
@@ -615,8 +661,17 @@ public class Translator {
 			if (!state.success()) {
 				return state.toFailedPhaseResult();
 			}
+			final String joinedBody = state.getJoinedResult();
+
+			// Validate heading structure for incremental translations
+			try {
+				validateHeadingStructure(job, joinedBody);
+			} catch (HeadingStructureMismatchException e) {
+				return currentResult.withFailure("BODY", e.getMessage(), state.totalElapsedMillis);
+			}
+
 			return currentResult.withBody(
-				state.getJoinedResult(),
+				joinedBody,
 				state.totalInputTokens,
 				state.totalOutputTokens,
 				state.totalElapsedMillis
@@ -625,9 +680,55 @@ public class Translator {
 	}
 
 	/**
+	 * Falls back to full body retranslation when the existing translation's heading
+	 * structure doesn't match the old source (e.g., translation was created before
+	 * heading validation existed, or the LLM added/removed headings during original
+	 * translation). Creates a temporary {@link TranslateNewJob} and delegates to the
+	 * standard body translation pipeline, which handles chunking if needed.
+	 *
+	 * @param currentResult the current phase result (with front matter already translated)
+	 * @param incrementalJob the original incremental translation job
+	 * @param executor       the executor for async operations
+	 * @return CompletionStage with updated PhaseResult containing the full retranslation
+	 */
+	@Nonnull
+	private CompletionStage<PhaseResult> translateFullBodyFallback(
+		@Nonnull PhaseResult currentResult,
+		@Nonnull TranslateIncrementalJob incrementalJob,
+		@Nonnull Executor executor
+	) {
+		// Create a new-translation job with the current source content
+		final TranslateNewJob fullJob = new TranslateNewJob(
+			incrementalJob.getSourceFile(),
+			incrementalJob.getTargetFile(),
+			incrementalJob.getLocale(),
+			incrementalJob.getSourceContent(),
+			incrementalJob.getCurrentCommit(),
+			incrementalJob.getInstructions(),
+			incrementalJob.getTranslatableFrontMatterFields()
+		);
+
+		// Check if document needs chunked translation
+		final MarkdownDocument sourceDoc = new MarkdownDocument(fullJob.getSourceContent());
+		final String bodyContent = sourceDoc.getBodyContent();
+		final List<DocumentChunk> chunks = this.documentSplitter.split(bodyContent);
+
+		if (chunks.size() > 1) {
+			return translateChunkedBody(currentResult, fullJob, chunks, executor);
+		}
+
+		return translateSingleBody(currentResult, fullJob, executor);
+	}
+
+	/**
 	 * Finds the translated content corresponding to an old section index.
-	 * Uses position-based mapping: if old section at index N, try to use translation section at
-	 * same relative position. Falls back to empty string if no matching translation exists.
+	 * Uses heading-aware mapping: intro sections match intro sections, and heading
+	 * sections are matched by their position among heading sections only. This handles
+	 * cases where old source and translation have different intro section presence
+	 * (e.g., translation has a "TODO" note before the first heading).
+	 *
+	 * Precondition: old source and translation have matching heading structures
+	 * (validated by {@link DocumentSectionSplitter#validateHeadingStructure} before calling).
 	 *
 	 * @param oldIndex            index in old sections
 	 * @param oldSections         the old source sections
@@ -640,11 +741,39 @@ public class Translator {
 		@Nonnull List<DocumentSection> oldSections,
 		@Nonnull List<DocumentSection> translationSections
 	) {
-		// If translation has same number of sections, use direct index mapping
-		if (oldIndex < translationSections.size()) {
-			return translationSections.get(oldIndex).content();
+		final DocumentSection oldSection = oldSections.get(oldIndex);
+
+		if (oldSection.isIntro()) {
+			// Find intro section in translation (if any)
+			for (final DocumentSection ts : translationSections) {
+				if (ts.isIntro()) {
+					return ts.content();
+				}
+			}
+			// No intro in translation — use old source content as fallback
+			return oldSection.content();
 		}
-		// Fallback: use old source content (will need retranslation eventually)
+
+		// Count position among heading (non-intro) sections in old list
+		int headingPosition = 0;
+		for (int i = 0; i < oldIndex; i++) {
+			if (!oldSections.get(i).isIntro()) {
+				headingPosition++;
+			}
+		}
+
+		// Find the heading section at the same position in translation
+		int count = 0;
+		for (final DocumentSection ts : translationSections) {
+			if (!ts.isIntro()) {
+				if (count == headingPosition) {
+					return ts.content();
+				}
+				count++;
+			}
+		}
+
+		// Fallback: no matching translation section found — use old source content
 		if (oldIndex < oldSections.size()) {
 			return oldSections.get(oldIndex).content();
 		}
@@ -652,7 +781,8 @@ public class Translator {
 	}
 
 	/**
-	 * Translates a single section with surrounding context.
+	 * Translates a single section with surrounding context, validates heading structure,
+	 * and retries once if the heading structure is wrong.
 	 *
 	 * @param state     the current section-based translation state
 	 * @param job       the incremental translation job
@@ -678,26 +808,22 @@ public class Translator {
 			this.promptLoader, task.content(), precedingContext, followingContext
 		);
 
+		// Determine expected heading level from source section
+		final List<DocumentSection> sourceParts = DocumentSectionSplitter.split(task.content());
+		final int expectedHeadingLevel = sourceParts.isEmpty() ? 0 : sourceParts.get(0).headingLevel();
+
 		return CompletableFuture.supplyAsync(() -> {
 			final long startTime = System.currentTimeMillis();
 			try {
-				final List<ChatMessage> messages = List.of(
-					SystemMessage.from(systemPrompt),
-					UserMessage.from(userPrompt)
+				final SectionTranslationResult result = translateAndValidateSection(
+					systemPrompt, userPrompt, task.content(), expectedHeadingLevel
 				);
 
-				final ChatResponse response = this.llmClient.chat(messages);
 				final long elapsedMillis = System.currentTimeMillis() - startTime;
-				final TokenUsage tokenUsage = response.tokenUsage();
-
-				final long inputTokens = tokenUsage != null ? tokenUsage.inputTokenCount() : 0;
-				final long outputTokens = tokenUsage != null ? tokenUsage.outputTokenCount() : 0;
-
-				this.inputTokenCount.addAndGet(inputTokens);
-				this.outputTokenCount.addAndGet(outputTokens);
-
-				final String translatedSection = response.aiMessage().text();
-				return state.withTranslatedSection(taskIndex, translatedSection, inputTokens, outputTokens, elapsedMillis);
+				return state.withTranslatedSection(
+					taskIndex, result.translatedContent(),
+					result.inputTokens(), result.outputTokens(), elapsedMillis
+				);
 
 			} catch (NonRetriableException e) {
 				throw e;
@@ -707,6 +833,144 @@ public class Translator {
 			}
 		}, executor);
 	}
+
+	/**
+	 * Translates a section, validates heading structure, and retries once on mismatch.
+	 * Accumulates token counts from both the first attempt and the retry (if any).
+	 *
+	 * @param systemPrompt        the system prompt for translation
+	 * @param userPrompt          the user prompt for the section
+	 * @param sourceContent       the source section content (for validation)
+	 * @param expectedHeadingLevel the expected heading level (0 for intro)
+	 * @return the translation result with accumulated tokens
+	 * @throws HeadingStructureMismatchException if retry also fails validation
+	 */
+	@Nonnull
+	private SectionTranslationResult translateAndValidateSection(
+		@Nonnull String systemPrompt,
+		@Nonnull String userPrompt,
+		@Nonnull String sourceContent,
+		int expectedHeadingLevel
+	) throws HeadingStructureMismatchException {
+		// First attempt
+		final ChatResponse firstResponse = this.llmClient.chat(List.of(
+			SystemMessage.from(systemPrompt),
+			UserMessage.from(userPrompt)
+		));
+		final TokenUsage firstUsage = firstResponse.tokenUsage();
+		final long firstInputTokens = firstUsage != null ? firstUsage.inputTokenCount() : 0;
+		final long firstOutputTokens = firstUsage != null ? firstUsage.outputTokenCount() : 0;
+
+		this.inputTokenCount.addAndGet(firstInputTokens);
+		this.outputTokenCount.addAndGet(firstOutputTokens);
+
+		final String firstResult = firstResponse.aiMessage().text();
+
+		// Validate heading structure
+		try {
+			validateSectionHeadingStructure(sourceContent, firstResult);
+			return new SectionTranslationResult(
+				firstResult, firstInputTokens, firstOutputTokens
+			);
+		} catch (HeadingStructureMismatchException e) {
+			// Retry once with corrective prompt
+			final String correctionPrompt = buildHeadingCorrectionPrompt(
+				sourceContent, expectedHeadingLevel, e.getMessage()
+			);
+
+			final ChatResponse retryResponse = this.llmClient.chat(List.of(
+				SystemMessage.from(systemPrompt),
+				UserMessage.from(correctionPrompt)
+			));
+			final TokenUsage retryUsage = retryResponse.tokenUsage();
+			final long retryInputTokens = retryUsage != null ? retryUsage.inputTokenCount() : 0;
+			final long retryOutputTokens = retryUsage != null ? retryUsage.outputTokenCount() : 0;
+
+			this.inputTokenCount.addAndGet(retryInputTokens);
+			this.outputTokenCount.addAndGet(retryOutputTokens);
+
+			final String retryResult = retryResponse.aiMessage().text();
+
+			// Validate retry — if this throws, it propagates to the caller
+			validateSectionHeadingStructure(sourceContent, retryResult);
+
+			return new SectionTranslationResult(
+				retryResult,
+				firstInputTokens + retryInputTokens,
+				firstOutputTokens + retryOutputTokens
+			);
+		}
+	}
+
+	/**
+	 * Validates that a translated section preserves the heading structure of the source section.
+	 * A section should produce the same number of sub-sections with matching heading levels
+	 * when split by {@link DocumentSectionSplitter}.
+	 *
+	 * @param sourceContent     the original source section content
+	 * @param translatedContent the LLM-translated section content
+	 * @throws HeadingStructureMismatchException if the heading structure does not match
+	 */
+	private void validateSectionHeadingStructure(
+		@Nonnull String sourceContent,
+		@Nonnull String translatedContent
+	) throws HeadingStructureMismatchException {
+		final List<DocumentSection> sourceSections = DocumentSectionSplitter.split(sourceContent);
+		final List<DocumentSection> translatedSections = DocumentSectionSplitter.split(translatedContent);
+
+		DocumentSectionSplitter.validateHeadingStructure(sourceSections, translatedSections);
+	}
+
+	/**
+	 * Builds a corrective user prompt for retrying a section translation
+	 * where heading structure validation failed.
+	 *
+	 * @param sourceContent       the original source section to translate
+	 * @param expectedHeadingLevel the expected heading level (0 for intro)
+	 * @param errorDescription    description of what was wrong
+	 * @return the corrective user prompt
+	 */
+	@Nonnull
+	private String buildHeadingCorrectionPrompt(
+		@Nonnull String sourceContent,
+		int expectedHeadingLevel,
+		@Nonnull String errorDescription
+	) {
+		final StringBuilder prompt = new StringBuilder();
+		prompt.append("Your previous translation had a heading structure error: ");
+		prompt.append(errorDescription).append("\n\n");
+
+		if (expectedHeadingLevel == 0) {
+			prompt.append("RULE: This section has NO heading. ");
+			prompt.append("Your translation must NOT introduce any headings.\n\n");
+		} else {
+			final String hashes = "#".repeat(expectedHeadingLevel);
+			prompt.append("RULE: This section starts with exactly ONE heading at level ");
+			prompt.append(expectedHeadingLevel).append(" (").append(hashes).append("). ");
+			prompt.append("Your translation MUST start with exactly ONE heading at the same level (");
+			prompt.append(hashes).append("), MUST NOT change the heading level, ");
+			prompt.append("and MUST NOT add any additional headings.\n\n");
+		}
+
+		prompt.append("Please translate this section again correctly:\n\n");
+		prompt.append(sourceContent);
+
+		return prompt.toString();
+	}
+
+	/**
+	 * Internal record for the result of translating and validating a single section,
+	 * including token counts accumulated across any retry attempt.
+	 *
+	 * @param translatedContent the translated section content
+	 * @param inputTokens       total input tokens used (including retry)
+	 * @param outputTokens      total output tokens used (including retry)
+	 */
+	private record SectionTranslationResult(
+		@Nonnull String translatedContent,
+		long inputTokens,
+		long outputTokens
+	) {}
 
 	/**
 	 * Validates that the translated body has the same heading structure as the source.

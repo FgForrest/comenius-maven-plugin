@@ -56,6 +56,73 @@ public class ComeniusMojoTest {
     }
 
     @Test
+    public void shouldShowCustomFrontMatterInConfig() throws MojoExecutionException {
+        ComeniusMojo mojo = new ComeniusMojo();
+
+        StringBuilder out = new StringBuilder();
+        Log capturingLog = new Log() {
+            @Override public boolean isDebugEnabled() { return true; }
+            @Override public void debug(CharSequence content) { out.append(content).append('\n'); }
+            @Override public void debug(CharSequence content, Throwable error) { out.append(content).append('\n'); }
+            @Override public void debug(Throwable error) { out.append(String.valueOf(error)).append('\n'); }
+            @Override public boolean isInfoEnabled() { return true; }
+            @Override public void info(CharSequence content) { out.append(content).append('\n'); }
+            @Override public void info(CharSequence content, Throwable error) { out.append(content).append('\n'); }
+            @Override public void info(Throwable error) { out.append(String.valueOf(error)).append('\n'); }
+            @Override public boolean isWarnEnabled() { return true; }
+            @Override public void warn(CharSequence content) { out.append(content).append('\n'); }
+            @Override public void warn(CharSequence content, Throwable error) { out.append(content).append('\n'); }
+            @Override public void warn(Throwable error) { out.append(String.valueOf(error)).append('\n'); }
+            @Override public boolean isErrorEnabled() { return true; }
+            @Override public void error(CharSequence content) { out.append(content).append('\n'); }
+            @Override public void error(CharSequence content, Throwable error) { out.append(content).append('\n'); }
+            @Override public void error(Throwable error) { out.append(String.valueOf(error)).append('\n'); }
+        };
+        mojo.setLog(capturingLog);
+        mojo.setAction("show-config");
+        mojo.setCustomFrontMatter(java.util.Map.of("translated", "true", "generator", "comenius"));
+
+        mojo.execute();
+
+        String log = out.toString();
+        assertTrue(log.contains("customFrontMatter:"), "Should contain customFrontMatter header: " + log);
+        assertTrue(log.contains("translated: true"), "Should show translated property: " + log);
+        assertTrue(log.contains("generator: comenius"), "Should show generator property: " + log);
+    }
+
+    @Test
+    public void shouldShowCustomFrontMatterNoneWhenNotConfigured() throws MojoExecutionException {
+        ComeniusMojo mojo = new ComeniusMojo();
+
+        StringBuilder out = new StringBuilder();
+        Log capturingLog = new Log() {
+            @Override public boolean isDebugEnabled() { return true; }
+            @Override public void debug(CharSequence content) { out.append(content).append('\n'); }
+            @Override public void debug(CharSequence content, Throwable error) { out.append(content).append('\n'); }
+            @Override public void debug(Throwable error) { out.append(String.valueOf(error)).append('\n'); }
+            @Override public boolean isInfoEnabled() { return true; }
+            @Override public void info(CharSequence content) { out.append(content).append('\n'); }
+            @Override public void info(CharSequence content, Throwable error) { out.append(content).append('\n'); }
+            @Override public void info(Throwable error) { out.append(String.valueOf(error)).append('\n'); }
+            @Override public boolean isWarnEnabled() { return true; }
+            @Override public void warn(CharSequence content) { out.append(content).append('\n'); }
+            @Override public void warn(CharSequence content, Throwable error) { out.append(content).append('\n'); }
+            @Override public void warn(Throwable error) { out.append(String.valueOf(error)).append('\n'); }
+            @Override public boolean isErrorEnabled() { return true; }
+            @Override public void error(CharSequence content) { out.append(content).append('\n'); }
+            @Override public void error(CharSequence content, Throwable error) { out.append(content).append('\n'); }
+            @Override public void error(Throwable error) { out.append(String.valueOf(error)).append('\n'); }
+        };
+        mojo.setLog(capturingLog);
+        mojo.setAction("show-config");
+
+        mojo.execute();
+
+        String log = out.toString();
+        assertTrue(log.contains("customFrontMatter: <none>"), "Should show <none> when not configured: " + log);
+    }
+
+    @Test
     public void shouldLimitToOneFileInDryRunTranslate() throws Exception {
         // Prepare temp directory with two matching files in a git repo
         Path root = Files.createTempDirectory("mojo-limit-");

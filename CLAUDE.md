@@ -150,6 +150,7 @@ public class TraverserTest {
 | `comenius.targets` | List of Target (locale, targetDir) | - |
 | `comenius.limit` | Max files to process | `Integer.MAX_VALUE` |
 | `comenius.dryRun` | Simulation mode | `true` |
+| `comenius.customFrontMatter` | Custom key-value pairs for translated files' front matter | - |
 
 ## Project-Specific Conventions
 

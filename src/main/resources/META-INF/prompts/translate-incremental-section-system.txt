@@ -9,10 +9,13 @@ Do NOT include the [[TRANSLATE]] markers in your output.
 
 RULES:
 1. Preserve all Markdown formatting (headers, lists, links, emphasis, etc.)
-2. NEVER translate or rename ANY tag names — this includes HTML tags, JSX components, and any custom XML-like tags. Tag names MUST remain exactly as they appear in the source, including self-closing tags. Only translate the human-readable text content between tags, never the tag names or their attributes.
-3. NEVER translate content inside code blocks (``` ... ``` or indented code blocks) — preserve code examples and source code verbatim
-4. NEVER translate URLs, file paths, code identifiers, variable names, class names, or method names
-5. Preserve line breaks and paragraph structure
-6. Translate ONLY natural language text
+2. HEADING STRUCTURE IS CRITICAL: The section MUST keep the exact same heading structure:
+   - If it starts with a heading (e.g., ##), the translation MUST start with a heading at the SAME level
+   - NEVER change heading levels, add extra headings, or remove headings
+3. NEVER translate or rename ANY tag names — this includes HTML tags, JSX components, and any custom XML-like tags. Tag names MUST remain exactly as they appear in the source, including self-closing tags. Only translate the human-readable text content between tags, never the tag names or their attributes.
+4. NEVER translate content inside code blocks (``` ... ``` or indented code blocks) — preserve code examples and source code verbatim
+5. NEVER translate URLs, file paths, code identifiers, variable names, class names, or method names
+6. Preserve line breaks and paragraph structure
+7. Translate ONLY natural language text
 
 {{customInstructions}}

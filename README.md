@@ -78,6 +78,7 @@ The plugin provides four actions via the `comenius.action` parameter:
 | `parallelism`          | `comenius.parallelism`          | `4`           | Number of parallel translation threads              |
 | `excludedFilePatterns` | `comenius.excludedFilePatterns` | -             | List of regex patterns to exclude directories/files |
 | `translatableFrontMatterFields` | `comenius.translatableFrontMatterFields` | - | Front matter fields to translate (e.g., title, perex) |
+| `customFrontMatter` | `comenius.customFrontMatter` | - | Custom key-value pairs to add to translated files' front matter |
 
 ## Recommended Workflow
 
@@ -334,6 +335,39 @@ Note that:
 
 When using incremental translation mode, only front matter fields that have **changed** in the source file are
 re-translated. Unchanged fields preserve their existing translations.
+
+## Custom Front Matter Properties
+
+You can add custom key-value pairs to the front matter of all translated files. This is useful for distinguishing
+translated files from their originals - for example, to display an "auto-translated" disclaimer on your website.
+
+### Configuration
+
+```xml
+<configuration>
+    <customFrontMatter>
+        <translated>true</translated>
+        <generator>comenius</generator>
+    </customFrontMatter>
+</configuration>
+```
+
+### Example
+
+With the configuration above, translated files will include the custom properties:
+
+```yaml
+---
+title: Erste Schritte
+author: John Doe
+translated: 'true'
+generator: comenius
+commit: abc123def456
+---
+```
+
+Custom properties are applied after source and translated fields but before the system-managed `commit` field.
+The `commit` field cannot be overridden via custom front matter.
 
 ## Fixing Links in Translated Files
 

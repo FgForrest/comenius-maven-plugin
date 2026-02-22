@@ -100,6 +100,10 @@ public class ComeniusMojo extends AbstractMojo {
 	@Parameter(property = "comenius.translatableFrontMatterFields")
 	private List<String> translatableFrontMatterFields;
 
+	/** Custom key-value pairs to add to the front matter of all translated files. */
+	@Parameter(property = "comenius.customFrontMatter")
+	private Map<String, String> customFrontMatter;
+
 	@Override
 	public void execute() throws MojoExecutionException {
 		if (this.action == null || this.action.isBlank()) {
@@ -177,6 +181,14 @@ public class ComeniusMojo extends AbstractMojo {
 				log.info("   - " + field);
 			}
 		}
+		if (this.customFrontMatter == null || this.customFrontMatter.isEmpty()) {
+			log.info(" - customFrontMatter: <none>");
+		} else {
+			log.info(" - customFrontMatter:");
+			for (final Map.Entry<String, String> entry : this.customFrontMatter.entrySet()) {
+				log.info("   - " + entry.getKey() + ": " + entry.getValue());
+			}
+		}
 	}
 
 	@Nonnull
@@ -244,8 +256,11 @@ public class ComeniusMojo extends AbstractMojo {
 				// LangChain4j handles retry logic internally
 				final LlmClient llmClient = new LlmClient(chatModel);
 				final PromptLoader promptLoader = new PromptLoader();
-				translator = new Translator(llmClient, promptLoader, translationPool);
+				translator = new Translator(llmClient, promptLoader, translationPool, log);
 				executor = new TranslationExecutor(translationPool, translator, new Writer(), log, root);
+				if (this.customFrontMatter != null && !this.customFrontMatter.isEmpty()) {
+					executor.setCustomFrontMatter(this.customFrontMatter);
+				}
 			}
 
 			// Process each target locale
@@ -718,6 +733,7 @@ public class ComeniusMojo extends AbstractMojo {
 	void setParallelism(final int parallelism) { this.parallelism = parallelism; }
 	void setExcludedFilePatterns(@Nullable final List<String> patterns) { this.excludedFilePatterns = patterns; }
 	void setTranslatableFrontMatterFields(@Nullable final List<String> fields) { this.translatableFrontMatterFields = fields; }
+	void setCustomFrontMatter(@Nullable final Map<String, String> customFrontMatter) { this.customFrontMatter = customFrontMatter; }
 
 	/** Target language configuration. */
 	public static class Target {

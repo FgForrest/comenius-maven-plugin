@@ -513,6 +513,288 @@ public class TranslatorTest {
 		assertTrue(content.contains("Einleitung"), "Unchanged intro content preserved");
 	}
 
+	@Test
+	@DisplayName("handles translation with intro when source has none")
+	void shouldHandleTranslationWithIntroWhenSourceHasNone() throws Exception {
+		// The exact reported bug: translation has "TODO" intro text before headings,
+		// but English source starts directly with a heading — off-by-one in positional mapping
+		mockModel.setResponse("## Zakladni typy\n\nAktualizovany obsah.", 100, 50);
+
+		final String oldSource = "## Basic File Types\n\nOriginal content.\n\n## Storage Model\n\nStorage info.";
+		final String newSource = "## Basic File Types\n\nUpdated content.\n\n## Storage Model\n\nStorage info.";
+		final String existingTranslation =
+			"TODO JNO: prelozit\n\n## Zakladni typy\n\nPuvodni obsah.\n\n## Model uloziste\n\nInfo o ulozisti.";
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/storage-model.md"),
+			Path.of("/target/cs/storage-model.md"),
+			Locale.forLanguageTag("cs"),
+			newSource,
+			"def456",
+			null,
+			null,
+			oldSource,
+			existingTranslation,
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertTrue(result.success());
+		assertEquals(1, mockModel.getCallCount());
+		final String content = result.translatedContent();
+		// The unchanged "Storage Model" section should be preserved from translation
+		assertTrue(content.contains("Model uloziste"), "Unchanged heading section should be preserved");
+		// The "TODO" intro should NOT appear as content of a heading section
+		assertFalse(content.contains("TODO"), "Intro content should not leak into heading sections");
+	}
+
+	@Test
+	@DisplayName("handles source with intro when translation has none")
+	void shouldHandleSourceWithIntroWhenTranslationHasNone() throws Exception {
+		// Reverse case: old source has intro but translation doesn't
+		mockModel.setResponse("## Neuer Inhalt\n\nAktualisiert.", 100, 50);
+
+		final String oldSource = "Note: draft\n\n## Section A\n\nOriginal.\n\n## Section B\n\nContent.";
+		final String newSource = "Note: draft\n\n## Section A\n\nModified.\n\n## Section B\n\nContent.";
+		final String existingTranslation = "## Abschnitt A\n\nUrspruenglich.\n\n## Abschnitt B\n\nInhalt.";
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			newSource,
+			"def456",
+			null,
+			null,
+			oldSource,
+			existingTranslation,
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertTrue(result.success());
+		assertEquals(1, mockModel.getCallCount());
+		final String content = result.translatedContent();
+		assertTrue(content.contains("Abschnitt B"), "Unchanged section B should be preserved");
+	}
+
+	@Test
+	@DisplayName("handles both source and translation having intro sections")
+	void shouldHandleBothHavingIntroSections() throws Exception {
+		// Both have intro — positional mapping among heading sections should still work
+		mockModel.setResponse("## Neuer Abschnitt\n\nAktualisierter Inhalt.", 100, 50);
+
+		final String oldSource = "Intro text.\n\n## Section A\n\nOriginal.\n\n## Section B\n\nContent.";
+		final String newSource = "Intro text.\n\n## Section A\n\nModified.\n\n## Section B\n\nContent.";
+		final String existingTranslation =
+			"Einleitungstext.\n\n## Abschnitt A\n\nUrspruenglich.\n\n## Abschnitt B\n\nInhalt.";
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			newSource,
+			"def456",
+			null,
+			null,
+			oldSource,
+			existingTranslation,
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertTrue(result.success());
+		assertEquals(1, mockModel.getCallCount());
+		final String content = result.translatedContent();
+		assertTrue(content.contains("Einleitungstext"), "Unchanged intro should be preserved");
+		assertTrue(content.contains("Abschnitt B"), "Unchanged heading section should be preserved");
+	}
+
+	@Test
+	@DisplayName("validates heading structure in section-based translation")
+	void shouldValidateHeadingStructureInSectionBasedTranslation() throws Exception {
+		// LLM returns response with extra heading — both first attempt and retry fail
+		mockModel.setResponse("## Extra Heading\n\nContent.\n\n## Another\n\nMore.", 100, 50);
+
+		final String oldSource = "## Section A\n\nOriginal.";
+		final String newSource = "## Section A\n\nModified.";
+		final String existingTranslation = "## Abschnitt A\n\nUrspruenglich.";
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			newSource,
+			"def456",
+			null,
+			null,
+			oldSource,
+			existingTranslation,
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertFalse(result.success(), "Should fail due to heading structure mismatch");
+		assertTrue(
+			result.errorMessage().contains("Section count mismatch") ||
+				result.errorMessage().contains("Heading level mismatch"),
+			"Error should mention heading structure mismatch"
+		);
+		// Both first attempt and retry should have been called
+		assertEquals(2, mockModel.getCallCount());
+	}
+
+	@Test
+	@DisplayName("retries once when section heading level is wrong, then succeeds")
+	void shouldRetryOnceWhenSectionHeadingLevelIsWrong() throws Exception {
+		// First call: wrong heading level (H4 instead of H2)
+		mockModel.addResponse("#### Abschnitt A\n\nModifizierter Inhalt.", 100, 50);
+		// Second call (retry): correct heading level
+		mockModel.addResponse("## Abschnitt A\n\nModifizierter Inhalt.", 100, 50);
+
+		final String oldSource = "## Section A\n\nOriginal content.";
+		final String newSource = "## Section A\n\nModified content.";
+		final String existingTranslation = "## Abschnitt A\n\nUrspruenglicher Inhalt.";
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			newSource,
+			"def456",
+			null,
+			null,
+			oldSource,
+			existingTranslation,
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertTrue(result.success(), "Should succeed after retry with correct heading");
+		assertTrue(result.translatedContent().contains("## Abschnitt A"));
+		// Two LLM calls: first attempt (wrong level) + retry (correct)
+		assertEquals(2, mockModel.getCallCount());
+	}
+
+	@Test
+	@DisplayName("fails when retry also has wrong heading structure")
+	void shouldFailWhenRetryAlsoHasWrongHeadingStructure() throws Exception {
+		// Both attempts produce extra headings
+		mockModel.addResponse("## Extra\n\nContent.\n\n## Another\n\nMore.", 100, 50);
+		mockModel.addResponse("## Still Extra\n\nContent.\n\n## Still Another\n\nMore.", 100, 50);
+
+		final String oldSource = "## Section A\n\nOriginal.";
+		final String newSource = "## Section A\n\nModified.";
+		final String existingTranslation = "## Abschnitt A\n\nUrspruenglich.";
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			newSource,
+			"def456",
+			null,
+			null,
+			oldSource,
+			existingTranslation,
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertFalse(result.success(), "Should fail when both attempts have wrong headings");
+		assertEquals(2, mockModel.getCallCount());
+	}
+
+	@Test
+	@DisplayName("does not retry when section heading is correct on first attempt")
+	void shouldNotRetryWhenSectionHeadingIsCorrect() throws Exception {
+		mockModel.setResponse("## Abschnitt A\n\nModifizierter Inhalt.", 100, 50);
+
+		final String oldSource = "## Section A\n\nOriginal.";
+		final String newSource = "## Section A\n\nModified.";
+		final String existingTranslation = "## Abschnitt A\n\nUrspruenglich.";
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			newSource,
+			"def456",
+			null,
+			null,
+			oldSource,
+			existingTranslation,
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertTrue(result.success());
+		// Only 1 LLM call — no retry needed
+		assertEquals(1, mockModel.getCallCount());
+	}
+
+	@Test
+	@DisplayName("falls back to full retranslation when old source and translation have different heading structure")
+	void shouldFallBackToFullRetranslationWhenHeadingStructuresDiffer() throws Exception {
+		// LLM response for the full retranslation
+		mockModel.setResponse(
+			"## Zakladni typy\n\nObsah.\n\n### Podnadpis\n\nDalsi obsah.\n\n#### WAL format\n\nWAL obsah.",
+			200, 100
+		);
+
+		// Old source has 2 heading sections (no WAL subsection)
+		final String oldSource = "## Basic File Types\n\nContent.\n\n### Subsection\n\nMore content.";
+		// New source has 3 heading sections (WAL subsection added)
+		final String newSource = "## Basic File Types\n\nContent.\n\n### Subsection\n\nMore content.\n\n#### WAL Format\n\nWAL content.";
+		// Existing translation has 3 heading sections (LLM added the extra heading during original full translation)
+		final String existingTranslation = "## Zakladni typy\n\nPuvodni obsah.\n\n### Podnadpis\n\nDalsi.\n\n#### WAL format\n\nWAL.";
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/cs/doc.md"),
+			Locale.forLanguageTag("cs"),
+			newSource,
+			"def456",
+			null,
+			null,
+			oldSource,
+			existingTranslation,
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertTrue(result.success(), "Should succeed via full retranslation fallback");
+		// Full retranslation should produce one LLM call for the entire body
+		assertEquals(1, mockModel.getCallCount());
+		// Result should contain the full retranslation
+		assertTrue(result.translatedContent().contains("Zakladni typy"));
+		assertTrue(result.translatedContent().contains("WAL format"));
+	}
+
 	/**
 	 * Simple mock implementation of ChatModel for testing.
 	 * Supports queuing multiple responses for sequential calls.

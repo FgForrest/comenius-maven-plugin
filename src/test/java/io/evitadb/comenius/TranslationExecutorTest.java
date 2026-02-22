@@ -214,6 +214,80 @@ public class TranslationExecutorTest {
 	}
 
 	@Test
+	@DisplayName("adds custom front matter properties to translated files")
+	void shouldAddCustomFrontMatterToTranslation() throws Exception {
+		mockModel.setResponse("# Inhalt", 100, 50);
+		executor.setCustomFrontMatter(Map.of("translated", "true", "generator", "comenius"));
+
+		final Path targetFile = tempDir.resolve("target/doc.md");
+		final TranslateNewJob job = new TranslateNewJob(
+			sourceDir.resolve("doc.md"),
+			targetFile,
+			Locale.GERMAN,
+			"# Content",
+			"abc123",
+			null,
+			null
+		);
+
+		executor.executeAll(List.of(job));
+
+		final String content = Files.readString(targetFile);
+		assertTrue(content.contains("translated: 'true'"), "Should contain translated property: " + content);
+		assertTrue(content.contains("generator: comenius"), "Should contain generator property: " + content);
+		assertTrue(content.contains("commit:"), "Should still contain commit field: " + content);
+	}
+
+	@Test
+	@DisplayName("does not allow custom front matter to override commit field")
+	void shouldNotAllowCustomFrontMatterToOverrideCommit() throws Exception {
+		mockModel.setResponse("# Inhalt", 100, 50);
+		executor.setCustomFrontMatter(Map.of("commit", "custom-value"));
+
+		final Path targetFile = tempDir.resolve("target/doc.md");
+		final String commitHash = "abc123def456789";
+		final TranslateNewJob job = new TranslateNewJob(
+			sourceDir.resolve("doc.md"),
+			targetFile,
+			Locale.GERMAN,
+			"# Content",
+			commitHash,
+			null,
+			null
+		);
+
+		executor.executeAll(List.of(job));
+
+		final String content = Files.readString(targetFile);
+		assertTrue(content.contains(commitHash), "Commit should be system value: " + content);
+		assertFalse(content.contains("custom-value"), "Custom commit should not appear: " + content);
+	}
+
+	@Test
+	@DisplayName("handles null custom front matter gracefully")
+	void shouldHandleNullCustomFrontMatter() throws Exception {
+		mockModel.setResponse("# Inhalt", 100, 50);
+		// Do not set customFrontMatter (remains null)
+
+		final Path targetFile = tempDir.resolve("target/doc.md");
+		final TranslateNewJob job = new TranslateNewJob(
+			sourceDir.resolve("doc.md"),
+			targetFile,
+			Locale.GERMAN,
+			"# Content",
+			"abc123",
+			null,
+			null
+		);
+
+		executor.executeAll(List.of(job));
+
+		final String content = Files.readString(targetFile);
+		assertTrue(content.contains("commit:"), "Should contain commit field: " + content);
+		assertFalse(content.contains("translated:"), "Should not contain custom properties: " + content);
+	}
+
+	@Test
 	@DisplayName("shouldRejectInvalidParallelism")
 	void shouldRejectInvalidParallelism() {
 		assertThrows(IllegalArgumentException.class, () ->

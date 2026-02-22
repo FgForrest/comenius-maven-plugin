@@ -72,6 +72,12 @@ public final class TranslationExecutor {
 	 */
 	@Nullable
 	private volatile NonRetriableException permanentFailureCause = null;
+	/**
+	 * Custom key-value pairs to add to the front matter of all translated files.
+	 * Applied after translated fields but before the commit field.
+	 */
+	@Nullable
+	private Map<String, String> customFrontMatter;
 
 	/**
 	 * Creates a translation executor using an existing ForkJoinPool.
@@ -135,6 +141,17 @@ public final class TranslationExecutor {
 			throw new IllegalArgumentException("parallelism must be at least 1");
 		}
 		return new ForkJoinPool(parallelism);
+	}
+
+	/**
+	 * Sets custom front matter properties to add to all translated files.
+	 * These properties are applied after source and translated fields,
+	 * but before the commit field.
+	 *
+	 * @param customFrontMatter map of property names to values, or null for none
+	 */
+	public void setCustomFrontMatter(@Nullable Map<String, String> customFrontMatter) {
+		this.customFrontMatter = customFrontMatter;
 	}
 
 	/**
@@ -378,7 +395,14 @@ public final class TranslationExecutor {
 			doc.setProperty(entry.getKey(), entry.getValue());
 		}
 
-		// Add commit field (added at end if not in source)
+		// Apply custom front matter properties (before commit to preserve system commit field)
+		if (this.customFrontMatter != null) {
+			for (final Map.Entry<String, String> entry : this.customFrontMatter.entrySet()) {
+				doc.setProperty(entry.getKey(), entry.getValue());
+			}
+		}
+
+		// Add commit field (added at end if not in source, always takes precedence)
 		doc.setProperty("commit", job.getCurrentCommit());
 
 		this.writer.write(doc, job.getTargetFile());

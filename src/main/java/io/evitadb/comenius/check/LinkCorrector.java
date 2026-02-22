@@ -362,15 +362,38 @@ public final class LinkCorrector {
 		// Decode URL-encoded path for file resolution
 		final String decodedPath = URLDecoder.decode(path, StandardCharsets.UTF_8);
 
+		// Strip query parameters (e.g., ?lang=java) — they are URL-level,
+		// not part of the filesystem path
+		final int queryIndex = decodedPath.indexOf('?');
+		final String fileSystemPath = queryIndex >= 0
+			? decodedPath.substring(0, queryIndex)
+			: decodedPath;
+
 		// Resolve the link target relative to the source file
 		final Path sourceFileDir = context.sourceFile.getParent();
-		final Path targetPath = sourceFileDir.resolve(decodedPath).normalize();
+		final Path targetPath = sourceFileDir.resolve(fileSystemPath).normalize();
 
-		// Check if this is a translatable markdown file
+		// Check if this is a translatable markdown file.
+		// Also try with .md extension appended for extensionless links —
+		// documentation links often omit it (e.g., "run-evitadb?lang=java").
+		final Path resolvedMarkdownPath;
 		if (isTranslatableMarkdown(targetPath)) {
+			resolvedMarkdownPath = targetPath;
+		} else {
+			final String fileName = targetPath.getFileName().toString();
+			if (!fileName.contains(".")) {
+				// Extensionless link — try appending .md
+				final Path withMd = targetPath.resolveSibling(fileName + ".md");
+				resolvedMarkdownPath = isTranslatableMarkdown(withMd) ? withMd : null;
+			} else {
+				resolvedMarkdownPath = null;
+			}
+		}
+
+		if (resolvedMarkdownPath != null) {
 			// This file is translated, so it exists in targetDir with the same relative path.
 			// The path itself doesn't need correction, but the anchor might.
-			return correctMarkdownLink(linkInfo, targetPath, context);
+			return correctMarkdownLink(linkInfo, resolvedMarkdownPath, context);
 		} else {
 			// This is an asset - needs path correction
 			return correctAssetLink(linkInfo, targetPath, context);
