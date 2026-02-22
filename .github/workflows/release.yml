@@ -38,4 +38,4 @@ jobs:
           mvn -B
           -P release-sign-artifacts
           -Dmaven.test.skip=true
-          javadoc:jar source:jar deploy
+          deploy
