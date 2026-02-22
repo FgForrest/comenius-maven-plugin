@@ -23,7 +23,7 @@ Add the plugin to your `pom.xml`:
 ```xml
 
 <plugin>
-    <groupId>io.evitadb</groupId>
+    <groupId>one.edee.oss</groupId>
     <artifactId>comenius-maven-plugin</artifactId>
     <version>1.0.0</version>
     <configuration>
