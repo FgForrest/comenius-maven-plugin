@@ -13,6 +13,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Traverses a source directory recursively, finds files matching a regex pattern and
@@ -101,7 +102,7 @@ public final class Traverser {
 
 	private void collectFiles(@Nonnull final Path dir, @Nonnull final List<Path> out) throws IOException {
 		final List<Path> children = new ArrayList<>();
-		try (var stream = Files.list(dir)) {
+		try (Stream<Path> stream = Files.list(dir)) {
 			stream.forEach(children::add);
 		}
 		// Sort for deterministic recursion order (directories and files together)

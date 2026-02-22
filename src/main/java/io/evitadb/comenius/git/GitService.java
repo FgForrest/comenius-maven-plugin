@@ -242,7 +242,7 @@ public final class GitService {
 		)) {
 			String line;
 			while ((line = reader.readLine()) != null) {
-				if (stdout.length() > 0) {
+				if (!stdout.isEmpty()) {
 					stdout.append("\n");
 				}
 				stdout.append(line);
@@ -255,7 +255,7 @@ public final class GitService {
 		)) {
 			String line;
 			while ((line = reader.readLine()) != null) {
-				if (stderr.length() > 0) {
+				if (!stderr.isEmpty()) {
 					stderr.append("\n");
 				}
 				stderr.append(line);

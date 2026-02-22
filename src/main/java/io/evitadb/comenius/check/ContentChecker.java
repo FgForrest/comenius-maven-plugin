@@ -158,11 +158,11 @@ public final class ContentChecker {
 			targetPath = this.gitRoot.resolve(pathWithoutSlash).normalize();
 		} else {
 			// Relative path: resolve from source file's parent directory
-			final Path sourceDir = sourceFile.getParent();
-			if (sourceDir == null) {
+			final Path sourceFileDir = sourceFile.getParent();
+			if (sourceFileDir == null) {
 				return;
 			}
-			targetPath = sourceDir.resolve(decodedPath).normalize();
+			targetPath = sourceFileDir.resolve(decodedPath).normalize();
 		}
 
 		// Check if target file exists
@@ -211,8 +211,10 @@ public final class ContentChecker {
 				));
 			}
 		} catch (IOException e) {
-			// Cannot read target file - should already be reported as FILE_NOT_FOUND
-			// if we got here from validatePathLink
+			// Cannot read target file — for path links this is already reported as
+			// FILE_NOT_FOUND by validatePathLink; for anchor-only links (called from
+			// checkLinks) the file is the source itself and should always be readable,
+			// so this branch is effectively unreachable.
 		}
 	}
 

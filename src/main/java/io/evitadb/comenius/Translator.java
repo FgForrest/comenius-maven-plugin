@@ -525,7 +525,7 @@ public class Translator {
 				final String chunk = this.translatedChunks[i];
 				if (chunk != null) {
 					// Add newline separator if previous chunk didn't end with newline
-					if (sb.length() > 0 && !sb.toString().endsWith("\n")) {
+					if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') {
 						sb.append("\n\n");
 					}
 					sb.append(chunk);
@@ -574,10 +574,8 @@ public class Translator {
 		// If heading structures don't match (e.g., translation was created before heading
 		// validation existed, or the LLM added/removed headings during original translation),
 		// section-based mapping is unreliable — fall back to full retranslation.
-		final List<DocumentSection> oldHeadings = oldSections.stream()
-			.filter(s -> !s.isIntro()).toList();
-		final List<DocumentSection> translationHeadings = translationSections.stream()
-			.filter(s -> !s.isIntro()).toList();
+		final List<DocumentSection> oldHeadings = filterHeadingSections(oldSections);
+		final List<DocumentSection> translationHeadings = filterHeadingSections(translationSections);
 		try {
 			DocumentSectionSplitter.validateHeadingStructure(oldHeadings, translationHeadings);
 		} catch (HeadingStructureMismatchException e) {
@@ -721,6 +719,25 @@ public class Translator {
 	}
 
 	/**
+	 * Filters a list of document sections, returning only heading sections (non-intro).
+	 *
+	 * @param sections the sections to filter
+	 * @return list containing only sections with heading level > 0
+	 */
+	@Nonnull
+	private static List<DocumentSection> filterHeadingSections(
+		@Nonnull List<DocumentSection> sections
+	) {
+		final List<DocumentSection> headings = new ArrayList<>(sections.size());
+		for (final DocumentSection section : sections) {
+			if (!section.isIntro()) {
+				headings.add(section);
+			}
+		}
+		return headings;
+	}
+
+	/**
 	 * Finds the translated content corresponding to an old section index.
 	 * Uses heading-aware mapping: intro sections match intro sections, and heading
 	 * sections are matched by their position among heading sections only. This handles
@@ -774,10 +791,7 @@ public class Translator {
 		}
 
 		// Fallback: no matching translation section found — use old source content
-		if (oldIndex < oldSections.size()) {
-			return oldSections.get(oldIndex).content();
-		}
-		return "";
+		return oldSection.content();
 	}
 
 	/**
@@ -857,20 +871,14 @@ public class Translator {
 			SystemMessage.from(systemPrompt),
 			UserMessage.from(userPrompt)
 		));
-		final TokenUsage firstUsage = firstResponse.tokenUsage();
-		final long firstInputTokens = firstUsage != null ? firstUsage.inputTokenCount() : 0;
-		final long firstOutputTokens = firstUsage != null ? firstUsage.outputTokenCount() : 0;
-
-		this.inputTokenCount.addAndGet(firstInputTokens);
-		this.outputTokenCount.addAndGet(firstOutputTokens);
-
+		final long[] firstTokens = accumulateTokens(firstResponse);
 		final String firstResult = firstResponse.aiMessage().text();
 
 		// Validate heading structure
 		try {
 			validateSectionHeadingStructure(sourceContent, firstResult);
 			return new SectionTranslationResult(
-				firstResult, firstInputTokens, firstOutputTokens
+				firstResult, firstTokens[0], firstTokens[1]
 			);
 		} catch (HeadingStructureMismatchException e) {
 			// Retry once with corrective prompt
@@ -882,13 +890,7 @@ public class Translator {
 				SystemMessage.from(systemPrompt),
 				UserMessage.from(correctionPrompt)
 			));
-			final TokenUsage retryUsage = retryResponse.tokenUsage();
-			final long retryInputTokens = retryUsage != null ? retryUsage.inputTokenCount() : 0;
-			final long retryOutputTokens = retryUsage != null ? retryUsage.outputTokenCount() : 0;
-
-			this.inputTokenCount.addAndGet(retryInputTokens);
-			this.outputTokenCount.addAndGet(retryOutputTokens);
-
+			final long[] retryTokens = accumulateTokens(retryResponse);
 			final String retryResult = retryResponse.aiMessage().text();
 
 			// Validate retry — if this throws, it propagates to the caller
@@ -896,10 +898,27 @@ public class Translator {
 
 			return new SectionTranslationResult(
 				retryResult,
-				firstInputTokens + retryInputTokens,
-				firstOutputTokens + retryOutputTokens
+				firstTokens[0] + retryTokens[0],
+				firstTokens[1] + retryTokens[1]
 			);
 		}
+	}
+
+	/**
+	 * Extracts token counts from a chat response and accumulates them into the global counters.
+	 * Returns a two-element array: [inputTokens, outputTokens].
+	 *
+	 * @param response the chat response to extract tokens from
+	 * @return array of [inputTokens, outputTokens]
+	 */
+	@Nonnull
+	private long[] accumulateTokens(@Nonnull ChatResponse response) {
+		final TokenUsage usage = response.tokenUsage();
+		final long inputTokens = usage != null ? usage.inputTokenCount() : 0;
+		final long outputTokens = usage != null ? usage.outputTokenCount() : 0;
+		this.inputTokenCount.addAndGet(inputTokens);
+		this.outputTokenCount.addAndGet(outputTokens);
+		return new long[]{inputTokens, outputTokens};
 	}
 
 	/**
@@ -1083,7 +1102,7 @@ public class Translator {
 			for (int i = 0; i < this.resultSections.length; i++) {
 				final String section = this.resultSections[i];
 				if (section != null) {
-					if (sb.length() > 0 && !sb.toString().endsWith("\n")) {
+					if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') {
 						sb.append("\n\n");
 					}
 					sb.append(section);

@@ -20,11 +20,12 @@ public record DocumentChunk(
 	int endOffset,
 	@Nonnull String content,
 	int headingLevel,
-	@Nullable String headingText
+	@Nullable String headingText,
+	int sizeInBytes
 ) {
 
 	/**
-	 * Creates a DocumentChunk with validation.
+	 * Creates a DocumentChunk with validation and cached byte size.
 	 *
 	 * @param index        zero-based index of this chunk
 	 * @param startOffset  byte offset where this chunk starts
@@ -32,6 +33,7 @@ public record DocumentChunk(
 	 * @param content      the chunk content
 	 * @param headingLevel the heading level (0-6)
 	 * @param headingText  the heading text, or null for intro content
+	 * @param sizeInBytes  the cached UTF-8 byte size (computed automatically if negative)
 	 */
 	public DocumentChunk {
 		if (index < 0) {
@@ -49,6 +51,28 @@ public record DocumentChunk(
 		if (content == null) {
 			throw new IllegalArgumentException("content must not be null");
 		}
+		sizeInBytes = content.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+	}
+
+	/**
+	 * Convenience constructor without pre-computed byte size.
+	 *
+	 * @param index        zero-based index of this chunk
+	 * @param startOffset  byte offset where this chunk starts
+	 * @param endOffset    byte offset where this chunk ends
+	 * @param content      the chunk content
+	 * @param headingLevel the heading level (0-6)
+	 * @param headingText  the heading text, or null for intro content
+	 */
+	public DocumentChunk(
+		int index,
+		int startOffset,
+		int endOffset,
+		@Nonnull String content,
+		int headingLevel,
+		@Nullable String headingText
+	) {
+		this(index, startOffset, endOffset, content, headingLevel, headingText, -1);
 	}
 
 	/**
@@ -88,12 +112,14 @@ public record DocumentChunk(
 	}
 
 	/**
-	 * Returns the size of this chunk in bytes using UTF-8 encoding.
+	 * Returns the cached size of this chunk in bytes using UTF-8 encoding.
+	 * The value is computed once at construction time.
 	 *
 	 * @return the byte size of the content
 	 */
+	@Override
 	public int sizeInBytes() {
-		return this.content.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+		return this.sizeInBytes;
 	}
 
 	/**

@@ -2,6 +2,7 @@ package io.evitadb.comenius.git;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.util.Objects;
 
 /**
  * Immutable record holding commit tracking information for a translated file.
@@ -18,6 +19,13 @@ public record CommitInfo(
 	int commitCount,
 	@Nullable String originalSource
 ) {
+
+	/**
+	 * Compact constructor validating required fields.
+	 */
+	public CommitInfo {
+		Objects.requireNonNull(currentCommit, "currentCommit must not be null");
+	}
 
 	/**
 	 * Returns true if this represents a new file (no previous translation exists).

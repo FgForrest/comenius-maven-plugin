@@ -210,10 +210,13 @@ public class ComeniusMojo extends AbstractMojo {
 		if (patterns == null || patterns.isEmpty()) {
 			return null;
 		}
-		return patterns.stream()
-			.filter(s -> s != null && !s.isBlank())
-			.map(Pattern::compile)
-			.toList();
+		final List<Pattern> compiled = new ArrayList<>(patterns.size());
+		for (final String s : patterns) {
+			if (s != null && !s.isBlank()) {
+				compiled.add(Pattern.compile(s));
+			}
+		}
+		return compiled;
 	}
 
 	private void translate(@Nonnull final Log log) {
@@ -258,9 +261,7 @@ public class ComeniusMojo extends AbstractMojo {
 				final PromptLoader promptLoader = new PromptLoader();
 				translator = new Translator(llmClient, promptLoader, translationPool, log);
 				executor = new TranslationExecutor(translationPool, translator, new Writer(), log, root);
-				if (this.customFrontMatter != null && !this.customFrontMatter.isEmpty()) {
-					executor.setCustomFrontMatter(this.customFrontMatter);
-				}
+				executor.setCustomFrontMatter(this.customFrontMatter);
 			}
 
 			// Process each target locale
@@ -522,65 +523,11 @@ public class ComeniusMojo extends AbstractMojo {
 
 					final List<LinkCorrectionResult> results = corrector.correctAllParallel(filesToProcess, pool);
 
-					// Write corrected files and collect statistics
-					final Writer writer = new Writer();
-					int totalCorrections = 0;
-					int filesWithCorrections = 0;
-					int correctionErrors = 0;
-
-					for (final LinkCorrectionResult result : results) {
-						if (!result.isSuccess()) {
-							correctionErrors++;
-							for (final String error : result.errors()) {
-								log.error("Link correction error in " + result.targetFile() + ": " + error);
-							}
-							continue;
-						}
-
-						if (result.totalCorrections() > 0) {
-							try {
-								final MarkdownDocument doc = new MarkdownDocument(result.correctedContent());
-								writer.write(doc, result.targetFile());
-								filesWithCorrections++;
-								totalCorrections += result.totalCorrections();
-								log.debug("Corrected " + result.totalCorrections() + " links in " +
-									result.targetFile().getFileName());
-							} catch (IOException e) {
-								log.error("Failed to write corrected file " + result.targetFile() + ": " + e.getMessage());
-								correctionErrors++;
-							}
-						}
-					}
-
-					log.info("Link corrections: " + totalCorrections + " in " + filesWithCorrections + " files");
-					if (correctionErrors > 0) {
-						log.error("Link correction errors: " + correctionErrors);
-					}
+					// Write corrected files
+					writeCorrectedFiles(log, results);
 
 					// Validation phase
-					log.info("--- Link Validation Phase ---");
-					final ContentChecker checker = new ContentChecker(gitService, targetDir, gitRoot);
-					int validatedCount = 0;
-
-					for (final LinkCorrectionResult result : results) {
-						if (result.isSuccess()) {
-							checker.checkFile(result.targetFile(), result.correctedContent());
-							validatedCount++;
-						}
-					}
-
-					final CheckResult checkResult = checker.getResult();
-
-					if (!checkResult.linkErrors().isEmpty()) {
-						log.error("Post-correction link validation errors: " + checkResult.linkErrors().size());
-						for (final LinkError error : checkResult.linkErrors()) {
-							final Path relativePath = targetDir.relativize(error.sourceFile());
-							log.error("  " + relativePath + ": " + error.linkDestination() +
-								" (" + error.type() + ")");
-						}
-					} else {
-						log.info("Validated " + validatedCount + " files - all links OK");
-					}
+					validateCorrectedLinks(log, targetDir, results, gitService, gitRoot);
 				}
 			} finally {
 				pool.shutdown();
@@ -658,7 +605,25 @@ public class ComeniusMojo extends AbstractMojo {
 
 		final List<LinkCorrectionResult> results = corrector.correctAllParallel(filesWithContent, executor);
 
-		// Write corrected files and collect statistics
+		// Write corrected files
+		writeCorrectedFiles(log, results);
+
+		// Validation phase
+		validateCorrectedLinks(log, targetDir, results, gitService, gitRoot);
+	}
+
+	/**
+	 * Writes corrected files to disk and logs statistics.
+	 *
+	 * @param log     Maven log for output
+	 * @param results the link correction results to write
+	 * @return array of [totalCorrections, filesWithCorrections, correctionErrors]
+	 */
+	@Nonnull
+	private static int[] writeCorrectedFiles(
+		@Nonnull Log log,
+		@Nonnull List<LinkCorrectionResult> results
+	) {
 		final Writer writer = new Writer();
 		int totalCorrections = 0;
 		int filesWithCorrections = 0;
@@ -693,7 +658,25 @@ public class ComeniusMojo extends AbstractMojo {
 			log.error("Link correction errors: " + correctionErrors);
 		}
 
-		// Validation phase
+		return new int[]{totalCorrections, filesWithCorrections, correctionErrors};
+	}
+
+	/**
+	 * Validates corrected links and logs any remaining errors.
+	 *
+	 * @param log        Maven log for output
+	 * @param targetDir  the target directory for relative path display
+	 * @param results    the link correction results to validate
+	 * @param gitService git service for validation
+	 * @param gitRoot    git repository root
+	 */
+	private static void validateCorrectedLinks(
+		@Nonnull Log log,
+		@Nonnull Path targetDir,
+		@Nonnull List<LinkCorrectionResult> results,
+		@Nonnull GitService gitService,
+		@Nonnull Path gitRoot
+	) {
 		log.info("--- Link Validation Phase ---");
 		final ContentChecker checker = new ContentChecker(gitService, targetDir, gitRoot);
 		int validatedCount = 0;

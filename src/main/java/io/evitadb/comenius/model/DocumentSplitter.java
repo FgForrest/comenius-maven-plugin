@@ -2,9 +2,7 @@ package io.evitadb.comenius.model;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.regex.Matcher;
@@ -77,7 +75,7 @@ public class DocumentSplitter {
 	public List<DocumentChunk> split(@Nonnull String bodyContent) {
 		Objects.requireNonNull(bodyContent, "bodyContent must not be null");
 
-		final int contentSize = bodyContent.getBytes(StandardCharsets.UTF_8).length;
+		final int contentSize = utf8ByteLength(bodyContent, 0, bodyContent.length());
 
 		// If under threshold, return single chunk
 		if (contentSize <= this.targetSize) {
@@ -137,7 +135,7 @@ public class DocumentSplitter {
 		final HeadingInfo firstHeading = headings.get(0);
 		if (firstHeading.offset() > 0) {
 			final String introContent = content.substring(0, firstHeading.offset());
-			final int introSize = introContent.getBytes(StandardCharsets.UTF_8).length;
+			final int introSize = utf8ByteLength(introContent, 0, introContent.length());
 
 			// If intro is large enough to be its own chunk
 			if (introSize > this.minSize) {
@@ -149,7 +147,7 @@ public class DocumentSplitter {
 
 		// Process headings to create chunks
 		while (currentStart < content.length()) {
-			final int currentSize = content.substring(currentStart).getBytes(StandardCharsets.UTF_8).length;
+			final int currentSize = utf8ByteLength(content, currentStart, content.length());
 
 			// If remaining content fits in one chunk, add it and done
 			if (currentSize <= this.maxSize) {
@@ -234,8 +232,7 @@ public class DocumentSplitter {
 			}
 
 			// Calculate chunk size if we split at this heading
-			final String candidateChunk = content.substring(currentStart, heading.offset());
-			final int candidateSize = candidateChunk.getBytes(StandardCharsets.UTF_8).length;
+			final int candidateSize = utf8ByteLength(content, currentStart, heading.offset());
 
 			// Check if within acceptable range
 			if (candidateSize >= this.minSize && candidateSize <= this.maxSize) {
@@ -254,9 +251,14 @@ public class DocumentSplitter {
 		}
 
 		// Prefer lowest level number (H1 has level 1, H6 has level 6)
-		return candidates.stream()
-			.min(Comparator.comparingInt(HeadingInfo::level))
-			.orElse(null);
+		HeadingInfo best = candidates.get(0);
+		for (int i = 1; i < candidates.size(); i++) {
+			final HeadingInfo candidate = candidates.get(i);
+			if (candidate.level() < best.level()) {
+				best = candidate;
+			}
+		}
+		return best;
 	}
 
 	/**
@@ -280,8 +282,7 @@ public class DocumentSplitter {
 				continue;
 			}
 
-			final String candidateChunk = content.substring(currentStart, heading.offset());
-			final int candidateSize = candidateChunk.getBytes(StandardCharsets.UTF_8).length;
+			final int candidateSize = utf8ByteLength(content, currentStart, heading.offset());
 
 			// If this heading would result in a chunk that's at least minimum size
 			if (candidateSize >= this.minSize) {
@@ -343,6 +344,33 @@ public class DocumentSplitter {
 	 */
 	public int getMaxSize() {
 		return this.maxSize;
+	}
+
+	/**
+	 * Computes the UTF-8 byte length of a substring without allocating a substring or byte array.
+	 * Iterates characters and counts bytes based on Unicode codepoint ranges.
+	 *
+	 * @param s     the string
+	 * @param start start index (inclusive)
+	 * @param end   end index (exclusive)
+	 * @return the UTF-8 byte length of the substring
+	 */
+	private static int utf8ByteLength(@Nonnull String s, int start, int end) {
+		int bytes = 0;
+		for (int i = start; i < end; ) {
+			final int cp = s.codePointAt(i);
+			if (cp <= 0x7F) {
+				bytes += 1;
+			} else if (cp <= 0x7FF) {
+				bytes += 2;
+			} else if (cp <= 0xFFFF) {
+				bytes += 3;
+			} else {
+				bytes += 4;
+			}
+			i += Character.charCount(cp);
+		}
+		return bytes;
 	}
 
 	/**

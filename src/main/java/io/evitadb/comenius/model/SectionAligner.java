@@ -2,6 +2,7 @@ package io.evitadb.comenius.model;
 
 import javax.annotation.Nonnull;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
@@ -38,12 +39,14 @@ public final class SectionAligner {
 		Objects.requireNonNull(newSections, "newSections must not be null");
 
 		// Extract hash sequences
-		final String[] oldHashes = oldSections.stream()
-			.map(DocumentSection::contentHash)
-			.toArray(String[]::new);
-		final String[] newHashes = newSections.stream()
-			.map(DocumentSection::contentHash)
-			.toArray(String[]::new);
+		final String[] oldHashes = new String[oldSections.size()];
+		for (int i = 0; i < oldSections.size(); i++) {
+			oldHashes[i] = oldSections.get(i).contentHash();
+		}
+		final String[] newHashes = new String[newSections.size()];
+		for (int i = 0; i < newSections.size(); i++) {
+			newHashes[i] = newSections.get(i).contentHash();
+		}
 
 		// Compute LCS indices
 		final List<int[]> lcs = computeLcs(oldHashes, newHashes);
@@ -143,13 +146,13 @@ public final class SectionAligner {
 			}
 		}
 
-		// Backtrack to find actual LCS pairs
+		// Backtrack to find actual LCS pairs (append, then reverse to avoid O(n^2))
 		final List<int[]> result = new ArrayList<>();
 		int i = m;
 		int j = n;
 		while (i > 0 && j > 0) {
 			if (oldHashes[i - 1].equals(newHashes[j - 1])) {
-				result.add(0, new int[]{i - 1, j - 1});
+				result.add(new int[]{i - 1, j - 1});
 				i--;
 				j--;
 			} else if (dp[i - 1][j] > dp[i][j - 1]) {
@@ -158,6 +161,7 @@ public final class SectionAligner {
 				j--;
 			}
 		}
+		Collections.reverse(result);
 
 		return result;
 	}

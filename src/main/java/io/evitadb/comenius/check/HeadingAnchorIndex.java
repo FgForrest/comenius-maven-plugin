@@ -1,10 +1,8 @@
 package io.evitadb.comenius.check;
 
 import org.commonmark.node.AbstractVisitor;
-import org.commonmark.node.Code;
 import org.commonmark.node.Heading;
 import org.commonmark.node.Node;
-import org.commonmark.node.Text;
 
 import javax.annotation.Nonnull;
 import java.util.ArrayList;
@@ -110,25 +108,11 @@ public final class HeadingAnchorIndex {
 
 		@Override
 		public void visit(@Nonnull Heading heading) {
-			final String text = extractText(heading);
+			final String text = TextExtractor.extractText(heading);
 			if (!text.isEmpty()) {
 				this.anchors.add(MarkdownHeadingExtractor.slugify(text));
 			}
 			visitChildren(heading);
-		}
-
-		/**
-		 * Extracts plain text from a heading node and its children.
-		 *
-		 * @param node the node to extract text from
-		 * @return concatenated text content
-		 */
-		@Nonnull
-		private String extractText(@Nonnull Node node) {
-			final StringBuilder sb = new StringBuilder();
-			final TextExtractor textExtractor = new TextExtractor(sb);
-			node.accept(textExtractor);
-			return sb.toString();
 		}
 
 		/**
@@ -139,30 +123,6 @@ public final class HeadingAnchorIndex {
 		@Nonnull
 		List<String> getAnchors() {
 			return this.anchors;
-		}
-	}
-
-	/**
-	 * Visitor to extract text content from nodes.
-	 * Handles both regular Text nodes and Code nodes (inline code).
-	 */
-	private static final class TextExtractor extends AbstractVisitor {
-
-		@Nonnull
-		private final StringBuilder sb;
-
-		TextExtractor(@Nonnull StringBuilder sb) {
-			this.sb = sb;
-		}
-
-		@Override
-		public void visit(@Nonnull Text text) {
-			this.sb.append(text.getLiteral());
-		}
-
-		@Override
-		public void visit(@Nonnull Code code) {
-			this.sb.append(code.getLiteral());
 		}
 	}
 }

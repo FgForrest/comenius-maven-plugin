@@ -43,6 +43,11 @@ public final class LinkCorrector {
 		"(!?\\[[^\\]]*\\])\\(([^)]+)\\)"
 	);
 
+	/**
+	 * Pattern to detect file extensions (any dot followed by word characters at end of string).
+	 */
+	private static final Pattern FILE_EXTENSION_PATTERN = Pattern.compile(".*\\.\\w+$");
+
 	@Nonnull
 	private final Path sourceDir;
 	@Nonnull
@@ -148,9 +153,11 @@ public final class LinkCorrector {
 			}, executor));
 		}
 
-		return futures.stream()
-			.map(CompletableFuture::join)
-			.toList();
+		final List<LinkCorrectionResult> results = new ArrayList<>(futures.size());
+		for (final CompletableFuture<LinkCorrectionResult> future : futures) {
+			results.add(future.join());
+		}
+		return results;
 	}
 
 	/**
@@ -199,24 +206,13 @@ public final class LinkCorrector {
 		// Reconstruct full document
 		final String correctedContent = document.serializeFrontMatter() + correctedBody;
 
-		if (!context.errors.isEmpty()) {
-			return new LinkCorrectionResult(
-				normalizedTarget,
-				correctedContent,
-				context.assetCorrections,
-				context.anchorCorrections,
-				context.frontMatterCorrections,
-				context.errors
-			);
-		}
-
 		return new LinkCorrectionResult(
 			normalizedTarget,
 			correctedContent,
 			context.assetCorrections,
 			context.anchorCorrections,
 			context.frontMatterCorrections,
-			List.of()
+			context.errors
 		);
 	}
 
@@ -557,11 +553,6 @@ public final class LinkCorrector {
 		}
 		return index;
 	}
-
-	/**
-	 * Pattern to detect file extensions (any dot followed by word characters at end of string).
-	 */
-	private static final Pattern FILE_EXTENSION_PATTERN = Pattern.compile(".*\\.\\w+$");
 
 	/**
 	 * Checks if a value appears to be a relative file path.

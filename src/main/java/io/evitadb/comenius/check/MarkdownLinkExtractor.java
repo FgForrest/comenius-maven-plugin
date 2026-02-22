@@ -21,7 +21,6 @@ public final class MarkdownLinkExtractor extends AbstractVisitor {
 
 	@Nonnull
 	private final List<LinkInfo> links = new ArrayList<>();
-	private boolean insideCodeBlock = false;
 
 	/**
 	 * Extracts all links from the given document node.
@@ -41,22 +40,18 @@ public final class MarkdownLinkExtractor extends AbstractVisitor {
 
 	@Override
 	public void visit(@Nonnull Link link) {
-		if (!this.insideCodeBlock) {
-			final String destination = link.getDestination();
-			if (destination != null && !destination.isEmpty()) {
-				this.links.add(LinkInfo.parse(destination));
-			}
+		final String destination = link.getDestination();
+		if (destination != null && !destination.isEmpty()) {
+			this.links.add(LinkInfo.parse(destination));
 		}
 		visitChildren(link);
 	}
 
 	@Override
 	public void visit(@Nonnull Image image) {
-		if (!this.insideCodeBlock) {
-			final String destination = image.getDestination();
-			if (destination != null && !destination.isEmpty()) {
-				this.links.add(LinkInfo.parse(destination));
-			}
+		final String destination = image.getDestination();
+		if (destination != null && !destination.isEmpty()) {
+			this.links.add(LinkInfo.parse(destination));
 		}
 		visitChildren(image);
 	}
