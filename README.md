@@ -14,7 +14,10 @@ while preserving formatting and structure.
 - **Dry Run Mode**: Preview what would be translated without making changes
 - **Custom Instructions**: Per-directory translation instructions via `.comenius-instructions` files
 - **Large Document Splitting**: Automatically splits documents exceeding 32kB at heading boundaries for translation
-- **Diff-Based Updates**: Incremental translations use unified diff format to minimize token usage
+- **Section-Based Incremental Updates**: Incremental translations compare document sections by hash and only retranslate changed sections
+- **Heading Structure Validation**: Validates that LLM output preserves the source heading structure
+- **Cross-Document Anchor Correction**: Automatically fixes stale anchor references in other translated files after retranslation
+- **Fuzzy Anchor Matching**: Uses Levenshtein distance and token overlap for anchor correction in translated documents
 
 ## Quick Start
 
@@ -25,7 +28,7 @@ Add the plugin to your `pom.xml`:
 <plugin>
     <groupId>one.edee.oss</groupId>
     <artifactId>comenius-maven-plugin</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1-SNAPSHOT</version>
     <configuration>
         <llmProvider>openai</llmProvider>
         <llmUrl>https://api.openai.com/v1</llmUrl>
@@ -74,7 +77,7 @@ The plugin provides four actions via the `comenius.action` parameter:
 | `fileRegex`            | `comenius.fileRegex`            | `(?i).*\.md`  | Regex pattern to match files                        |
 | `targets`              | `comenius.targets`              | -             | List of target languages and directories            |
 | `limit`                | `comenius.limit`                | `2147483647`  | Maximum number of files to process                  |
-| `dryRun`               | `comenius.dryRun`               | `true`        | When true, simulates without writing                |
+| `dryRun`               | `comenius.dryRun`               | `false`       | When true, simulates without writing                |
 | `parallelism`          | `comenius.parallelism`          | `4`           | Number of parallel translation threads              |
 | `excludedFilePatterns` | `comenius.excludedFilePatterns` | -             | List of regex patterns to exclude directories/files |
 | `translatableFrontMatterFields` | `comenius.translatableFrontMatterFields` | - | Front matter fields to translate (e.g., title, perex) |
@@ -333,8 +336,9 @@ Note that:
 
 ### Incremental Updates
 
-When using incremental translation mode, only front matter fields that have **changed** in the source file are
-re-translated. Unchanged fields preserve their existing translations.
+When using incremental translation mode, front matter is always **fully retranslated** for all configured fields.
+This is because the plugin cannot safely detect whether changes occurred specifically in front matter fields, so
+all configured fields are sent to the LLM for translation on every incremental update.
 
 ## Custom Front Matter Properties
 
@@ -385,15 +389,48 @@ mvn comenius:run -Dcomenius.action=fix-links
 
 ### What Gets Corrected
 
-1. **Asset links** - Relative paths to images, PDFs, and other assets are recalculated from the target directory to the source assets
-2. **Anchor links** - Internal anchors (e.g., `#section-title`) are translated by mapping heading positions between source and translated documents
-3. **Front matter links** - Links in translatable front matter fields are also corrected
+1. **Asset links** - Relative paths to images, PDFs, and other assets are recalculated from the target
+   directory to the source assets
+2. **Anchor links** - Internal anchors (e.g., `#section-title`) are corrected using a two-phase
+   fuzzy matching algorithm (see below)
+3. **Front matter links** - Links in both translatable and non-translatable front matter fields are
+   corrected. Translatable fields receive full markdown link correction. Non-translatable fields are
+   checked for file path values and corrected if the resolved file exists in the source directory.
+
+### Anchor Correction Algorithm
+
+Anchor references need correction because heading text gets translated, changing the generated slug.
+The plugin uses a two-phase strategy:
+
+**Phase A - Target Language Matching** (compare anchor against the translated document's headings):
+1. Exact match (case-insensitive)
+2. Levenshtein distance (threshold: `max(2, anchor.length() / 3)`)
+3. Token overlap (split on hyphens, strict majority match required)
+
+**Phase B - Source Language Matching** (if Phase A fails, match against the source document then
+position-map to translated):
+1. Find the anchor in the source document's heading index
+2. Map the matched position to the same position in the translated document's heading index
+3. Uses the same fuzzy matching strategies (exact, Levenshtein, token overlap) against the source
+
+This two-phase approach handles both minor slug variations and full heading translations.
 
 ### Required Parameters
 
 The `fix-links` action requires:
 - `sourceDir` - The source directory containing original files (used for anchor mapping)
 - `targets` - List of target directories to process
+
+### Optional Parameters
+
+The following parameters are also respected by `fix-links`:
+- `fileRegex` - Pattern to match files in target directories (default: `(?i).*\.md`)
+- `excludedFilePatterns` - Patterns to exclude from processing
+- `translatableFrontMatterFields` - Determines which front matter fields receive full link correction
+- `parallelism` - Number of parallel threads for link correction
+
+**Note:** `dryRun` and `limit` have no effect on the `fix-links` action. It always processes all
+matching files and always writes corrections to disk.
 
 ### Example
 
@@ -407,13 +444,18 @@ The action will process all target directories configured in your `pom.xml` and:
 1. Find all markdown files matching the `fileRegex` pattern in each target directory
 2. For each file, locate the corresponding source file at the same relative path in `sourceDir`
 3. Correct asset links (recalculate paths from target to source assets)
-4. Correct anchor links (map heading positions from source to translated document)
-5. Write corrected files back to disk
-6. Validate all links after correction
+4. Correct anchor links (two-phase fuzzy matching against translated and source headings)
+5. Correct front matter links (translatable fields: full correction; non-translatable: path correction)
+6. Write corrected files back to disk
+7. Validate all links after correction and report any remaining errors
 
 **Note:** Each file in the target directory must have a corresponding source file at the same
 relative path. For example, if processing `docs/de/guide/intro.md`, the source file
 `docs/en/guide/intro.md` must exist for anchor correction to work correctly.
+
+**Note:** Unlike the `translate` action, `fix-links` does **not** perform cross-document anchor
+correction (scanning other translated files for stale references). It only corrects links within
+the files it processes.
 
 ## Excluding Directories and Files
 
@@ -558,50 +600,115 @@ A 100kB document with this structure:
 Would be split preferentially at H1 headings (`# Introduction`, `# Getting Started`, `# Advanced Topics`),
 resulting in approximately 3 chunks that are each translated separately.
 
-## Incremental Translation (Diff-Based)
+## Incremental Translation (Section-Based)
 
-When updating existing translations, the plugin uses a diff-based approach to minimize token usage and
-improve accuracy:
+When updating existing translations, the plugin uses a section-based approach that compares document
+sections by content hash and only retranslates sections that have actually changed.
 
-1. The LLM receives the existing translation and source changes (unified diff)
-2. The LLM returns a unified diff describing changes to the translation
-3. The diff is applied to the existing translation
+### How It Works
+
+1. The source document (both old and new versions) and the existing translation are split into
+   sections at heading boundaries
+2. Each section's content is hashed using SHA-256
+3. Old and new source sections are aligned using a Longest Common Subsequence (LCS) algorithm
+4. Sections are classified as UNCHANGED, MODIFIED, ADDED, or DELETED
+5. Only MODIFIED and ADDED sections are sent to the LLM for translation
+6. UNCHANGED sections reuse the existing translation as-is
+7. DELETED sections are removed from the output
 
 ### Benefits
 
-- **Reduced token usage**: Only changes are sent and received, not the entire document
-- **Faster updates**: Smaller payloads mean faster API responses
-- **Better accuracy**: The LLM focuses only on changed content, reducing context confusion
+- **Reduced token usage**: Only changed sections are sent to the LLM, not the entire document
+- **Stable translations**: Unchanged sections keep their existing translations, avoiding unnecessary drift
+- **Context-aware**: Each section is translated with surrounding already-translated sections as context
+- **Structural safety**: Heading structure is validated after each section translation
 
-### Diff Format
+### Section Splitting
 
-The LLM produces standard unified diff format:
+- Documents are split at ATX-style heading boundaries (`#`, `##`, `###`, etc.)
+- Content before the first heading becomes an "intro" section
+- Each heading starts a new section
+- Sections are flat (not hierarchical) - every heading at any level starts a new section
 
-```diff
---- a/translation
-+++ b/translation
-@@ -5,7 +5,7 @@
- Some context line
- Another context line
--Old translated text
-+New translated text
- More context
-```
+### Context-Aware Prompts
 
-### Error Handling
+When translating a section, the LLM receives:
+- The section content wrapped in `[[TRANSLATE]]...[[/TRANSLATE]]` markers
+- Preceding already-translated sections (for reference only)
+- Following already-translated sections (for reference only)
+- Custom translation instructions (if configured)
 
-If the LLM produces an invalid diff:
+This ensures translation consistency across sections.
 
-1. The plugin retries with a correction prompt showing the invalid output
-2. If the second attempt also fails, the translation job is marked as failed
+### Heading Structure Validation
 
-**Note**: Unlike full translation failures, diff failures do **not** automatically fall back to complete
-retranslation. This ensures you're aware of potential issues that may require manual intervention.
+After each section is translated, the plugin validates that the LLM preserved the heading
+structure (same number of headings at the same levels). If validation fails:
 
-### Empty Changes
+1. The plugin retries once with a corrective prompt specifying the exact heading structure required
+2. If the retry also fails, the translation job is marked as failed
 
-If the source changes don't require any translation updates (e.g., only code formatting changed), the LLM
-may return an empty diff. In this case, the existing translation is preserved unchanged.
+### Fallback to Full Retranslation
+
+If the existing translation's heading structure doesn't match the old source (e.g., the translation
+was created before heading validation was added), the plugin falls back to a full retranslation of
+the entire document instead of section-based updates.
+
+### Unchanged Sections
+
+If no source sections have changed (all hashes match), the existing translation is preserved
+completely unchanged with no LLM calls for the body.
+
+## Two-Phase Translation Pipeline
+
+Each file is translated in two separate LLM calls:
+
+1. **Phase 1 - Front Matter**: Translatable front matter fields (e.g., `title`, `perex`) are extracted and
+   sent to the LLM as structured `[[fieldName]]...[[/fieldName]]` blocks. The LLM returns translated fields
+   in the same format. This phase is skipped if no `translatableFrontMatterFields` are configured.
+
+2. **Phase 2 - Body**: The markdown body is translated. For new files, the entire body is sent (or chunked
+   if over 32kB). For incremental updates, section-based translation is used.
+
+The two phases use separate prompt templates, allowing the LLM to focus on each task independently.
+Token usage from both phases is accumulated and reported in the summary.
+
+## Translation Workflow Phases
+
+When the `translate` action runs, it executes the following phases:
+
+1. **File Collection**: Scans the source directory, respects `fileRegex`, `excludedFilePatterns`, and `limit`
+2. **Job Creation**: For each file, creates a `TranslateNewJob` (no existing translation) or
+   `TranslateIncrementalJob` (updating existing translation). Files already up-to-date are skipped.
+3. **Translation Execution** (skipped if `dryRun=true`): Translates files in parallel using a ForkJoinPool.
+   Each job goes through the two-phase translation pipeline.
+4. **Link Correction**: Fixes asset paths and anchor references in all newly translated files
+5. **Cross-Document Anchor Correction**: Scans other existing translated files for stale anchor references
+   pointing to retranslated files, and updates them using fuzzy matching
+
+### Permanent Failure Handling
+
+If the LLM returns a permanent error (e.g., authentication failure, quota exceeded), the plugin:
+- Signals the LLM client to reject new requests
+- Shuts down the parallel executor immediately
+- Reports remaining jobs as cancelled
+
+## Cross-Document Anchor Correction
+
+After translating files, the plugin scans all other translated files in the target directory for anchor
+references that may have become stale due to heading changes in the retranslated files.
+
+### How It Works
+
+1. During translation, the plugin tracks which files had heading anchor changes
+2. After all translations complete, it scans existing translated files (excluding just-translated ones)
+3. For each link pointing to a retranslated file, it checks if the anchor still exists
+4. Stale anchors are corrected using a multi-strategy approach:
+   - **Exact match**: Anchor exists in the new document - no change needed
+   - **Position-based mapping**: If old and new heading counts match, maps by position
+   - **Fuzzy matching**: Levenshtein distance (threshold: `max(2, anchor.length() / 3)`) and
+     token overlap (split on hyphens, requires strict majority match)
+5. Uncorrectable anchors are logged as warnings
 
 ## Troubleshooting
 
