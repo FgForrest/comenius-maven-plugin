@@ -735,4 +735,4 @@ Run the `check` action and fix reported issues:
 
 ## License
 
-Apache License 2.0
+MIT License
