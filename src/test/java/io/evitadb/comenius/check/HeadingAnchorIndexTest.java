@@ -315,6 +315,25 @@ public class HeadingAnchorIndexTest {
 	}
 
 	@Test
+	@DisplayName("does not throw when a candidate anchor has a repeated hyphen token")
+	public void shouldNotThrowWhenCandidateAnchorHasRepeatedToken() {
+		// Heading slugifies to "entity-entity-schema" - repeated "entity" token
+		final String markdown = """
+			# Introduction
+			## Entity Entity Schema
+			""";
+		final MarkdownDocument doc = new MarkdownDocument(markdown);
+		final HeadingAnchorIndex index = HeadingAnchorIndex.fromDocument(doc.getDocument());
+
+		// Any 2+ token query triggers iteration over all candidates, including the
+		// one with a duplicated token - Set.of() must not be used for candidateTokens
+		// since it throws IllegalArgumentException on duplicate elements
+		final Optional<Integer> result = index.findClosestByTokenOverlap("entity-schema");
+		assertTrue(result.isPresent());
+		assertEquals(1, result.get());
+	}
+
+	@Test
 	@DisplayName("matches three-token anchor with one token missing")
 	public void shouldMatchThreeTokenAnchorWithOneTokenMissing() {
 		final String markdown = """

@@ -6,6 +6,7 @@ import org.commonmark.node.Node;
 
 import javax.annotation.Nonnull;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
@@ -137,7 +138,9 @@ public final class HeadingAnchorIndex {
 		int bestIndex = -1;
 		int bestMatchCount = 0;
 		for (int i = 0; i < this.anchors.size(); i++) {
-			final Set<String> candidateTokens = Set.of(this.anchors.get(i).split("-"));
+			// Set.copyOf (unlike Set.of) tolerates duplicate tokens in the candidate
+			// anchor (e.g. "entity-entity-schema"), deduplicating instead of throwing
+			final Set<String> candidateTokens = Set.copyOf(Arrays.asList(this.anchors.get(i).split("-")));
 			int matchCount = 0;
 			for (final String qt : queryTokens) {
 				if (candidateTokens.contains(qt)) {
