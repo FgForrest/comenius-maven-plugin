@@ -389,4 +389,67 @@ public class HeadingAnchorIndexTest {
 		final String translatedAnchor = translatedIndex.getAnchor(setupIndex.get());
 		assertEquals("configuracion", translatedAnchor);
 	}
+
+	@Test
+	@DisplayName("does not retarget an anchor onto a heading with a different token count")
+	void shouldNotMatchAcrossDifferentTokenCounts() {
+		// Real regression: the Czech range.md documents both attributeInRange and
+		// attributeInRangeNow. Dropping the trailing "nyni" token costs few edits, so
+		// Levenshtein happily pointed the "...-now" link at the plain range heading -
+		// silently swapping one constraint for another.
+		final HeadingAnchorIndex index = HeadingAnchorIndex.fromDocument(
+			new MarkdownDocument("## Atribut v rozsahu\n\nA.\n\n## Atribut v aktualnim rozsahu\n\nB.\n")
+				.getDocument()
+		);
+
+		assertTrue(
+			index.findClosest("atribut-v-rozsahu-nyni").isEmpty(),
+			"an anchor with one more token than every candidate must not be fuzzy-matched"
+		);
+	}
+
+	@Test
+	@DisplayName("still absorbs inflection, which never changes the token count")
+	void shouldStillMatchInflectedForms() {
+		final HeadingAnchorIndex index = HeadingAnchorIndex.fromDocument(
+			new MarkdownDocument("## Politiky konfliktu\n\nA.\n").getDocument()
+		);
+
+		final Optional<Integer> match = index.findClosest("politiky-konfliktu");
+		assertTrue(match.isPresent(), "a declension difference must still be corrected");
+		assertEquals("politiky-konfliktu", index.getAnchor(match.get()));
+	}
+
+	@Test
+	@DisplayName("does not token-match a short anchor onto a much longer heading")
+	void shouldNotTokenMatchOntoDilutedCandidate() {
+		// Real regression: "#price-histogram" matched both of its tokens inside the far
+		// longer granularity subsection, retargeting the link from the section to a
+		// subsection of it.
+		final HeadingAnchorIndex index = HeadingAnchorIndex.fromDocument(
+			new MarkdownDocument(
+				"## Cenovy histogram\n\nA.\n\n" +
+					"### Granularita cenoveho histogramu a zpracovani vnitrnich zaznamu price histogram granularity\n\nB.\n"
+			).getDocument()
+		);
+
+		final Optional<Integer> match = index.findClosestByTokenOverlap("price-histogram");
+		assertTrue(
+			match.isEmpty() || !index.getAnchor(match.get()).contains("granularity"),
+			"a two-token anchor must not be absorbed by a ten-token heading, got: "
+				+ match.map(index::getAnchor).orElse("<none>")
+		);
+	}
+
+	@Test
+	@DisplayName("still token-matches when the candidate is of comparable length")
+	void shouldStillTokenMatchComparableCandidate() {
+		final HeadingAnchorIndex index = HeadingAnchorIndex.fromDocument(
+			new MarkdownDocument("## Konfigurace REST API\n\nA.\n").getDocument()
+		);
+
+		final Optional<Integer> match = index.findClosestByTokenOverlap("rest-api-configuration");
+		assertTrue(match.isPresent(), "a genuine cross-language token match must survive");
+		assertEquals("konfigurace-rest-api", index.getAnchor(match.get()));
+	}
 }

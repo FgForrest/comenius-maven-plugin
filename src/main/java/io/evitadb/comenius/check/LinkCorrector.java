@@ -560,6 +560,22 @@ public final class LinkCorrector {
 			return anchor;
 		}
 
+		// A0: an anchor that still names a SOURCE heading exactly is not a fuzzy problem at
+		// all - the heading it points at is known, so map that position into the translation
+		// and be done. This has to be tried before any similarity search, because similarity
+		// on the target side happily "corrects" a source anchor onto whichever translated
+		// heading happens to look closest: '#price-histogram' was matched onto a
+		// price-histogram-*granularity* subsection that way, and '#attributes' onto a Czech
+		// heading it merely resembled. Both are exact position mappings once asked in the
+		// right order.
+		final HeadingAnchorIndex exactSourceIndex = getSourceAnchorIndex(sourceFile);
+		if (exactSourceIndex.size() == translatedIndex.size()) {
+			final Optional<Integer> exactSourcePosition = exactSourceIndex.indexOf(anchor);
+			if (exactSourcePosition.isPresent()) {
+				return translatedIndex.getAnchor(exactSourcePosition.get());
+			}
+		}
+
 		// A2: Levenshtein against translated index (same language)
 		final Optional<Integer> translatedFuzzy = translatedIndex.findClosest(anchor);
 		if (translatedFuzzy.isPresent()) {

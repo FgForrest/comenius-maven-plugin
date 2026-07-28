@@ -104,10 +104,26 @@ public final class HeadingAnchorIndex {
 		Objects.requireNonNull(anchor, "anchor must not be null");
 		final String normalizedAnchor = anchor.toLowerCase();
 		final int threshold = Math.max(2, normalizedAnchor.length() / 3);
+		final int anchorTokenCount = countTokens(normalizedAnchor);
 		int bestDistance = Integer.MAX_VALUE;
 		int bestIndex = -1;
 		for (int i = 0; i < this.anchors.size(); i++) {
-			final int distance = levenshteinDistance(normalizedAnchor, this.anchors.get(i));
+			final String candidate = this.anchors.get(i);
+			// A candidate with a different number of tokens is usually a different heading
+			// rather than a differently spelled one, and edit distance cannot tell those
+			// apart: dropping the whole word "now" turns "attribute-in-range-now" into
+			// "attribute-in-range" for four characters, comfortably inside any sane threshold
+			// - and silently retargets the link from one constraint onto another.
+			//
+			// The one legitimate reason for the counts to differ is hyphenation, e.g.
+			// "gettingstarted" against "getting-started". That case is recognisable on its
+			// own terms: strip the hyphens and the letters are identical. A dropped word
+			// leaves letters behind and is rejected.
+			if (countTokens(candidate) != anchorTokenCount
+				&& !withoutHyphens(normalizedAnchor).equals(withoutHyphens(candidate))) {
+				continue;
+			}
+			final int distance = levenshteinDistance(normalizedAnchor, candidate);
 			if (distance < bestDistance) {
 				bestDistance = distance;
 				bestIndex = i;
@@ -117,6 +133,34 @@ public final class HeadingAnchorIndex {
 			return Optional.of(bestIndex);
 		}
 		return Optional.empty();
+	}
+
+	/**
+	 * Strips every hyphen from an anchor slug, so that two anchors differing only in where
+	 * their word boundaries fall compare equal.
+	 *
+	 * @param anchor the anchor slug
+	 * @return the slug with all hyphens removed
+	 */
+	@Nonnull
+	private static String withoutHyphens(@Nonnull String anchor) {
+		return anchor.replace("-", "");
+	}
+
+	/**
+	 * Counts hyphen-separated tokens in an anchor slug.
+	 *
+	 * @param anchor the anchor slug
+	 * @return number of tokens, at least one
+	 */
+	private static int countTokens(@Nonnull String anchor) {
+		int tokens = 1;
+		for (int i = 0; i < anchor.length(); i++) {
+			if (anchor.charAt(i) == '-') {
+				tokens++;
+			}
+		}
+		return tokens;
 	}
 
 	/**
@@ -146,6 +190,15 @@ public final class HeadingAnchorIndex {
 				if (candidateTokens.contains(qt)) {
 					matchCount++;
 				}
+			}
+			// The matched tokens must also carry their weight on the candidate's side. A long
+			// heading contains many words, so a short query can hit "enough" of its own tokens
+			// while describing only a sliver of what the heading is about: '#price-histogram'
+			// matched both its words inside "price histogram granularity and inner-record
+			// handling" - two tokens out of ten - and silently retargeted the link from the
+			// section onto one of its subsections.
+			if (matchCount * 2 < candidateTokens.size()) {
+				continue;
 			}
 			if (matchCount > bestMatchCount) {
 				bestMatchCount = matchCount;
