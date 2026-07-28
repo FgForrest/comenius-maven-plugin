@@ -1,0 +1,6 @@
+{{customInstructions}}
+This fragment sits inside: {{context}}
+
+Fragment to translate:
+
+{{sourceContent}}
