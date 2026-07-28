@@ -5,12 +5,15 @@ import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.output.TokenUsage;
+import io.evitadb.comenius.check.HeadingAnchorIndex;
 import io.evitadb.comenius.llm.LlmClient;
 import io.evitadb.comenius.llm.PromptLoader;
+import io.evitadb.comenius.model.MarkdownDocument;
 import io.evitadb.comenius.model.TranslateIncrementalJob;
 import io.evitadb.comenius.model.TranslateNewJob;
 import io.evitadb.comenius.model.TranslationJob;
 import io.evitadb.comenius.model.TranslationResult;
+import io.evitadb.comenius.structure.TagVocabulary;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -19,6 +22,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.CompletionStage;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -125,6 +129,50 @@ public class TranslatorTest {
 		final String content = result.translatedContent();
 		assertTrue(content.contains("# Titel"), "Unchanged section should be preserved");
 		assertTrue(content.contains("Einfuehrungstext"), "Unchanged intro content should be preserved");
+	}
+
+	@Test
+	@DisplayName("shouldInsertBlankLineWhenJoiningSectionsThatLackOne")
+	void shouldInsertBlankLineWhenJoiningSectionsThatLackOne() throws Exception {
+		// The reused (UNCHANGED) section ends with only a single trailing newline - the exact
+		// seam that silently swallowed a heading into the preceding block in the 2026-07-28
+		// incident (no blank line before a heading means CommonMark does not treat it as one).
+		mockModel.setResponse("## Neuer Abschnitt\n\nUebersetzter neuer Text.", 200, 100);
+
+		final String oldSource = "# Title\n\nIntro text.\n\n## Section One\n\nOriginal content.";
+		final String newSource = "# Title\n\nIntro text.\n\n## Section Two\n\nNew content.";
+		final String existingTranslation = "# Titel\n\nEinfuehrungstext.\n## Abschnitt Eins\n\nInhalt.";
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			newSource,
+			"def456",
+			null,
+			null,
+			oldSource,
+			existingTranslation,
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = translator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertTrue(result.success(), "expected success, got: " + result.errorMessage());
+		final String content = result.translatedContent();
+		assertTrue(
+			content.contains("Einfuehrungstext.\n\n## Neuer Abschnitt"),
+			"expected a blank line before the joined heading, got: " + content
+		);
+
+		final MarkdownDocument doc = new MarkdownDocument(content);
+		final HeadingAnchorIndex headings = HeadingAnchorIndex.fromDocument(doc.getDocument());
+		assertEquals(
+			2, headings.size(),
+			"both headings must be recognised by a real markdown parser, not just visually present"
+		);
 	}
 
 	@Test
@@ -793,6 +841,68 @@ public class TranslatorTest {
 		// Result should contain the full retranslation
 		assertTrue(result.translatedContent().contains("Zakladni typy"));
 		assertTrue(result.translatedContent().contains("WAL format"));
+	}
+
+	@Test
+	@DisplayName("shouldFailNewJobOnStructuralMismatchWhenVocabularyProvided")
+	void shouldFailNewJobOnStructuralMismatchWhenVocabularyProvided() throws Exception {
+		final TagVocabulary vocabulary = TagVocabulary.of(Set.of("LS"), Set.of(), Set.of(), false);
+		final Translator vocabAwareTranslator = new Translator(
+			new LlmClient(mockModel), promptLoader, null, null, vocabulary
+		);
+
+		// the model drops the whole <LS> block - a heading-free block invisible to the
+		// pre-existing heading-only validation, exactly the defect this gate exists to catch
+		mockModel.setResponse("# Titulek\n\nUvod.\n", 100, 50);
+
+		final TranslateNewJob job = new TranslateNewJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/cs/doc.md"),
+			Locale.forLanguageTag("cs"),
+			"# Title\n\nIntro.\n\n<LS to=\"e\">\n\nEnglish text.\n\n</LS>\n",
+			"abc123",
+			null,
+			null
+		);
+
+		final CompletionStage<TranslationResult> stage = vocabAwareTranslator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertFalse(result.success());
+		assertTrue(
+			result.errorMessage() != null && result.errorMessage().contains("structural problem"),
+			"expected a structural-mismatch failure, got: " + result.errorMessage()
+		);
+	}
+
+	@Test
+	@DisplayName("shouldRepairTagCaseAndSucceedWhenStructureIntact")
+	void shouldRepairTagCaseAndSucceedWhenStructureIntact() throws Exception {
+		final TagVocabulary vocabulary = TagVocabulary.of(Set.of("LS"), Set.of(), Set.of(), false);
+		final Translator vocabAwareTranslator = new Translator(
+			new LlmClient(mockModel), promptLoader, null, null, vocabulary
+		);
+
+		// the model closes <LS> as lowercase </ls> - invisible to the case-sensitive vocabulary
+		// as a mismatch, since it simply isn't recognised as a tag at all
+		mockModel.setResponse("# Titulek\n\n<LS to=\"e\">\n\nCesky text.\n\n</ls>\n", 100, 50);
+
+		final TranslateNewJob job = new TranslateNewJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/cs/doc.md"),
+			Locale.forLanguageTag("cs"),
+			"# Title\n\n<LS to=\"e\">\n\nEnglish text.\n\n</LS>\n",
+			"abc123",
+			null,
+			null
+		);
+
+		final CompletionStage<TranslationResult> stage = vocabAwareTranslator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertTrue(result.success(), "expected success, got: " + result.errorMessage());
+		assertTrue(result.translatedContent().contains("</LS>"), "closing tag case should be repaired");
+		assertFalse(result.translatedContent().contains("</ls>"));
 	}
 
 	/**

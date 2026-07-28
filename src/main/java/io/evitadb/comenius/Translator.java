@@ -7,6 +7,7 @@ import dev.langchain4j.exception.NonRetriableException;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.output.TokenUsage;
+import io.evitadb.comenius.check.HeadingAnchorIndex;
 import io.evitadb.comenius.llm.LlmClient;
 import io.evitadb.comenius.llm.PromptLoader;
 import io.evitadb.comenius.model.DocumentChunk;
@@ -19,15 +20,23 @@ import io.evitadb.comenius.model.MarkdownDocument;
 import io.evitadb.comenius.model.PhaseResult;
 import io.evitadb.comenius.model.SectionAligner;
 import io.evitadb.comenius.model.SectionAlignment;
+import io.evitadb.comenius.model.StructuralMismatchException;
 import io.evitadb.comenius.model.TranslateIncrementalJob;
 import io.evitadb.comenius.model.TranslateNewJob;
 import io.evitadb.comenius.model.TranslationJob;
 import io.evitadb.comenius.model.TranslationResult;
+import io.evitadb.comenius.structure.MarkupScanner;
+import io.evitadb.comenius.structure.StructuralComparator;
+import io.evitadb.comenius.structure.TagBalance;
+import io.evitadb.comenius.structure.TagCaseRepairer;
+import io.evitadb.comenius.structure.TagVocabulary;
+import io.evitadb.comenius.structure.UntranslatedContentChecker;
 import org.apache.maven.plugin.logging.Log;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -65,6 +74,8 @@ public class Translator {
 	private final Log log;
 	@Nonnull
 	private final DocumentSplitter documentSplitter;
+	@Nullable
+	private final TagVocabulary vocabulary;
 	private final AtomicLong inputTokenCount = new AtomicLong(0);
 	private final AtomicLong outputTokenCount = new AtomicLong(0);
 
@@ -84,11 +95,38 @@ public class Translator {
 		@Nullable Executor executor,
 		@Nullable Log log
 	) {
+		this(llmClient, promptLoader, executor, log, null);
+	}
+
+	/**
+	 * Create a Translator using provided LlmClient, PromptLoader, Executor, Maven Log, and a
+	 * corpus-derived tag vocabulary.
+	 *
+	 * The vocabulary enables tag-case repair, untranslated-leaf-content detection with a cheap
+	 * autofix, and a structural comparison (tag sequence, inline tag multiset, blank line count)
+	 * that catches a class of defect heading-count validation is blind to - a heading-free block
+	 * (a language-switch span, an unclosed note) silently dropped by the model. Pass `null` to
+	 * skip all three and keep exactly the prior behaviour.
+	 *
+	 * @param llmClient    non-null LLM client to use
+	 * @param promptLoader non-null prompt loader for loading templates
+	 * @param executor     executor for async operations; may be null to use common pool
+	 * @param log          Maven log for diagnostic messages; may be null
+	 * @param vocabulary   corpus-derived tag vocabulary; may be null to skip the new checks
+	 */
+	public Translator(
+		@Nonnull LlmClient llmClient,
+		@Nonnull PromptLoader promptLoader,
+		@Nullable Executor executor,
+		@Nullable Log log,
+		@Nullable TagVocabulary vocabulary
+	) {
 		this.llmClient = Objects.requireNonNull(llmClient, "llmClient must not be null");
 		this.promptLoader = Objects.requireNonNull(promptLoader, "promptLoader must not be null");
 		this.executor = executor;
 		this.log = log;
 		this.documentSplitter = new DocumentSplitter();
+		this.vocabulary = vocabulary;
 	}
 
 	/**
@@ -346,10 +384,13 @@ public class Translator {
 				this.inputTokenCount.addAndGet(inputTokens);
 				this.outputTokenCount.addAndGet(outputTokens);
 
-				final String llmResponse = response.aiMessage().text();
+				String llmResponse = response.aiMessage().text();
 
 				// Validate heading structure for new translations
 				if (job instanceof TranslateNewJob) {
+					if (this.vocabulary != null) {
+						llmResponse = applyStructuralChecks(job, llmResponse);
+					}
 					validateHeadingStructure(job, llmResponse);
 				}
 
@@ -364,6 +405,109 @@ public class Translator {
 				return currentResult.withFailure("BODY", e.getMessage(), elapsedMillis);
 			}
 		}, executor);
+	}
+
+	/**
+	 * Repairs tag-case drift, autofixes untranslated leaf content, and hard-fails on any
+	 * structural mismatch that remains - the three checks validated during the scope-tree
+	 * probing work, applied here to the production new-job path.
+	 *
+	 * Order matters: case must be repaired first, because a case-drifted tag is invisible to the
+	 * case-sensitive vocabulary (it does not read as a mismatch, it reads as nothing), which would
+	 * otherwise desynchronize both the untranslated-content scan and the structural comparison
+	 * that follow it.
+	 *
+	 * @param job         the translation job, for source content and target locale
+	 * @param llmResponse the model's raw response
+	 * @return the repaired response
+	 * @throws StructuralMismatchException if the structure still does not match after repair
+	 */
+	@Nonnull
+	private String applyStructuralChecks(
+		@Nonnull TranslationJob job,
+		@Nonnull String llmResponse
+	) throws StructuralMismatchException {
+		final TagVocabulary tagVocabulary = Objects.requireNonNull(this.vocabulary);
+		final String sourceBody = new MarkdownDocument(job.getSourceContent()).getBodyContent();
+
+		final String caseRepaired = TagCaseRepairer.repair(tagVocabulary, sourceBody, llmResponse);
+		final String autofixed = autofixUntranslatedContent(
+			tagVocabulary, sourceBody, caseRepaired, job.getLocale()
+		);
+
+		final List<String> problems = StructuralComparator.compare(tagVocabulary, sourceBody, autofixed);
+		if (!problems.isEmpty()) {
+			throw new StructuralMismatchException(problems);
+		}
+		return autofixed;
+	}
+
+	/**
+	 * Detects untranslated leaf content and repairs it with small, targeted follow-up requests -
+	 * only the flagged phrase is sent back, not the whole body.
+	 *
+	 * A dedicated, single-phrase request is a stronger signal than the heuristic that flagged it:
+	 * if the model, asked to translate only this phrase with no surrounding distraction, still
+	 * returns it unchanged, that is accepted as the model's considered answer (a loanword, a
+	 * proper noun), not re-flagged as a survivor.
+	 *
+	 * @param tagVocabulary the vocabulary to scan with
+	 * @param sourceBody    the source document body
+	 * @param translated    the translated body, case already repaired
+	 * @param locale        the target locale
+	 * @return the translated body with every fixable suspect replaced
+	 */
+	@Nonnull
+	private String autofixUntranslatedContent(
+		@Nonnull TagVocabulary tagVocabulary,
+		@Nonnull String sourceBody,
+		@Nonnull String translated,
+		@Nonnull Locale locale
+	) {
+		final List<UntranslatedContentChecker.Suspect> suspects =
+			UntranslatedContentChecker.find(tagVocabulary, sourceBody, translated);
+		if (suspects.isEmpty()) {
+			return translated;
+		}
+		// applied back to front so that earlier offsets stay valid as later ones are spliced in
+		final List<UntranslatedContentChecker.Suspect> sorted = new ArrayList<>(suspects);
+		sorted.sort(Comparator.comparingInt(UntranslatedContentChecker.Suspect::start).reversed());
+		final StringBuilder fixed = new StringBuilder(translated);
+		for (final UntranslatedContentChecker.Suspect suspect : sorted) {
+			final String fix = translatePhrase(suspect.text(), locale);
+			if (!fix.equalsIgnoreCase(suspect.text().strip())) {
+				fixed.replace(suspect.start(), suspect.end(), fix);
+			}
+		}
+		return fixed.toString();
+	}
+
+	/**
+	 * Translates a single short phrase in isolation - the follow-up request the untranslated-
+	 * content autofix sends.
+	 *
+	 * @param phrase the phrase to translate
+	 * @param locale the target locale
+	 * @return the model's answer, whitespace-trimmed
+	 */
+	@Nonnull
+	private String translatePhrase(@Nonnull String phrase, @Nonnull Locale locale) {
+		final String systemPrompt = this.promptLoader.loadAndInterpolate("translate-phrase-system.txt", Map.of(
+			"locale", locale.getDisplayLanguage(Locale.ENGLISH),
+			"localeTag", locale.toLanguageTag()
+		));
+		final String userPrompt = this.promptLoader.loadAndInterpolate(
+			"translate-phrase-user.txt", Map.of("phrase", phrase)
+		);
+		final ChatResponse response = this.llmClient.chat(List.of(
+			SystemMessage.from(systemPrompt), UserMessage.from(userPrompt)
+		));
+		final TokenUsage usage = response.tokenUsage();
+		if (usage != null) {
+			this.inputTokenCount.addAndGet(usage.inputTokenCount());
+			this.outputTokenCount.addAndGet(usage.outputTokenCount());
+		}
+		return response.aiMessage().text().strip();
 	}
 
 	/**
@@ -564,9 +708,9 @@ public class Translator {
 		final MarkdownDocument newSourceDoc = new MarkdownDocument(job.getSourceContent());
 		final String existingTranslationBody = job.getExistingTranslationBody();
 
-		final List<DocumentSection> oldSections = DocumentSectionSplitter.split(oldSourceDoc.getBodyContent());
-		final List<DocumentSection> newSections = DocumentSectionSplitter.split(newSourceDoc.getBodyContent());
-		final List<DocumentSection> translationSections = DocumentSectionSplitter.split(existingTranslationBody);
+		final List<DocumentSection> oldSections = DocumentSectionSplitter.split(oldSourceDoc.getBodyContent(), this.vocabulary);
+		final List<DocumentSection> newSections = DocumentSectionSplitter.split(newSourceDoc.getBodyContent(), this.vocabulary);
+		final List<DocumentSection> translationSections = DocumentSectionSplitter.split(existingTranslationBody, this.vocabulary);
 
 		// Verify that old source and existing translation have matching heading structures.
 		// Compare only heading sections (not intros) — intro presence may legitimately differ
@@ -666,6 +810,65 @@ public class Translator {
 				validateHeadingStructure(job, joinedBody);
 			} catch (HeadingStructureMismatchException e) {
 				return currentResult.withFailure("BODY", e.getMessage(), state.totalElapsedMillis);
+			}
+
+			// Safety net: even with tag-aware section boundaries, an LLM can still perturb
+			// balance within a section it was asked to translate. Heading-structure validation
+			// alone does not catch this - see the 2026-07-28 incident where 10 files came out
+			// with dropped <Note>/<LS> opening tags despite matching heading levels.
+			if (this.vocabulary != null) {
+				final TagBalance.Result balance = TagBalance.match(
+					new MarkupScanner(this.vocabulary).scan(joinedBody)
+				);
+				if (!balance.isBalanced()) {
+					if (this.log != null) {
+						this.log.error(
+							"Incremental translation for " + job.getSourceFile() + " produced unbalanced" +
+								" markup after joining sections (tags: " + balance.pairedNames() +
+								") - failing rather than writing corrupted output."
+						);
+					}
+					return currentResult.withFailure(
+						"BODY", "Joined incremental translation has unbalanced tags: " + balance.pairedNames(),
+						state.totalElapsedMillis
+					);
+				}
+			}
+
+			// Safety net: a heading can be visually present yet invisible to a real markdown
+			// parser when a blank line is missing before it - it silently becomes part of the
+			// preceding block instead of a heading. TagBalance cannot see this (it is a
+			// whitespace defect, not a tag-pairing one); see the 2026-07-28 incident where a
+			// join seam dropped exactly this blank line.
+			//
+			// The source body is the ground truth: a translation must expose exactly as many
+			// parsed headings as its source does. Both sides go through commonmark, so a "#"
+			// line inside a fenced code block is counted (or ignored) identically on both sides
+			// and can never raise a false alarm - unlike a raw regex scan, which mistakes shell
+			// comments such as "# run in foreground" for headings.
+			{
+				final int sourceHeadingCount = HeadingAnchorIndex.fromDocument(
+					new MarkdownDocument(newSourceDoc.getBodyContent()).getDocument()
+				).size();
+				final int translatedHeadingCount = HeadingAnchorIndex.fromDocument(
+					new MarkdownDocument(joinedBody).getDocument()
+				).size();
+				if (sourceHeadingCount != translatedHeadingCount) {
+					if (this.log != null) {
+						this.log.error(
+							"Incremental translation for " + job.getSourceFile() + " exposes " +
+								translatedHeadingCount + " parsed headings while its source has " +
+								sourceHeadingCount + " - a heading was most likely swallowed by the block" +
+								" preceding it because a blank line went missing at a section seam." +
+								" Failing rather than writing corrupted output."
+						);
+					}
+					return currentResult.withFailure(
+						"BODY", "Joined incremental translation lost a heading to the preceding block (" +
+							sourceHeadingCount + " in source vs " + translatedHeadingCount + " parsed)",
+						state.totalElapsedMillis
+					);
+				}
 			}
 
 			return currentResult.withBody(
@@ -823,7 +1026,7 @@ public class Translator {
 		);
 
 		// Determine expected heading level from source section
-		final List<DocumentSection> sourceParts = DocumentSectionSplitter.split(task.content());
+		final List<DocumentSection> sourceParts = DocumentSectionSplitter.split(task.content(), this.vocabulary);
 		final int expectedHeadingLevel = sourceParts.isEmpty() ? 0 : sourceParts.get(0).headingLevel();
 
 		return CompletableFuture.supplyAsync(() -> {
@@ -934,8 +1137,8 @@ public class Translator {
 		@Nonnull String sourceContent,
 		@Nonnull String translatedContent
 	) throws HeadingStructureMismatchException {
-		final List<DocumentSection> sourceSections = DocumentSectionSplitter.split(sourceContent);
-		final List<DocumentSection> translatedSections = DocumentSectionSplitter.split(translatedContent);
+		final List<DocumentSection> sourceSections = DocumentSectionSplitter.split(sourceContent, this.vocabulary);
+		final List<DocumentSection> translatedSections = DocumentSectionSplitter.split(translatedContent, this.vocabulary);
 
 		DocumentSectionSplitter.validateHeadingStructure(sourceSections, translatedSections);
 	}
@@ -1005,11 +1208,12 @@ public class Translator {
 		final MarkdownDocument sourceDoc = new MarkdownDocument(job.getSourceContent());
 		final String sourceBody = sourceDoc.getBodyContent();
 
-		final List<DocumentSection> sourceSections = DocumentSectionSplitter.split(sourceBody);
-		final List<DocumentSection> translatedSections = DocumentSectionSplitter.split(translatedBody);
+		final List<DocumentSection> sourceSections = DocumentSectionSplitter.split(sourceBody, this.vocabulary);
+		final List<DocumentSection> translatedSections = DocumentSectionSplitter.split(translatedBody, this.vocabulary);
 
 		DocumentSectionSplitter.validateHeadingStructure(sourceSections, translatedSections);
 	}
+
 
 	/**
 	 * Internal record for a section that either keeps its existing translation or needs retranslation.
@@ -1102,7 +1306,18 @@ public class Translator {
 			for (int i = 0; i < this.resultSections.length; i++) {
 				final String section = this.resultSections[i];
 				if (section != null) {
-					if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') {
+					if (sb.length() > 0) {
+						// Normalize to exactly one blank line, regardless of how many
+						// trailing newlines the previous section happened to end with. A
+						// seam with only a single newline before a heading is not a blank
+						// line under CommonMark, so the heading silently stops being one -
+						// see the 2026-07-28 incident where this desynced heading counts
+						// between source and translation without touching any tag balance.
+						int end = sb.length();
+						while (end > 0 && sb.charAt(end - 1) == '\n') {
+							end--;
+						}
+						sb.setLength(end);
 						sb.append("\n\n");
 					}
 					sb.append(section);
