@@ -251,6 +251,36 @@ public class ComeniusMojoFixLinksTest {
 	}
 
 	@Test
+	@DisplayName("resolves cross-document links to translated siblings even when fileRegex narrows this run to one file")
+	public void shouldResolveCrossDocumentLinksRegardlessOfFileRegexScope() throws Exception {
+		// b.md is a real translatable sibling document, referenced by anchor from a.md.
+		writeFile(this.sourceDir, "a.md", "# A\n\nSee [Conclusion](b.md#conclusion).");
+		writeFile(this.sourceDir, "b.md", "# B\n\n## Conclusion\n\nThe end.");
+
+		// Target a.md still carries the untranslated anchor (as raw LLM output would);
+		// target b.md has its heading properly translated.
+		writeFile(this.targetDir, "a.md", "# A (DE)\n\nSiehe [Fazit](b.md#conclusion).");
+		writeFile(this.targetDir, "b.md", "# B (DE)\n\n## Fazit\n\nDas Ende.");
+
+		runGit("add", ".");
+		runGit("commit", "-m", "Add docs");
+
+		configureMojo();
+		// Scope this run to a.md only - b.md must still be recognised as a translatable
+		// document by the link corrector, not misfiled as a non-translatable asset.
+		this.mojo.setFileRegex(".*/a\\.md");
+
+		assertDoesNotThrow(() -> this.mojo.execute());
+
+		final String correctedContent = readFile(this.targetDir.resolve("a.md"));
+		assertTrue(correctedContent.contains("(b.md#fazit)"),
+			"Link to sibling document should stay within the target tree with a translated anchor. Actual: "
+				+ correctedContent);
+		assertTrue(!correctedContent.contains("../source/"),
+			"Link must not be misrouted into the source tree. Actual: " + correctedContent);
+	}
+
+	@Test
 	@DisplayName("respects excluded file patterns")
 	public void shouldRespectExcludedFilePatterns() throws Exception {
 		// Create files in different directories

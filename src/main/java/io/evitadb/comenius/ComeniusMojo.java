@@ -9,6 +9,7 @@ import io.evitadb.comenius.check.GitError;
 import io.evitadb.comenius.check.LinkCorrector;
 import io.evitadb.comenius.check.LinkCorrectionResult;
 import io.evitadb.comenius.check.LinkError;
+import io.evitadb.comenius.check.StructureRepairer;
 import io.evitadb.comenius.git.GitService;
 import io.evitadb.comenius.llm.ChatModelFactory;
 import io.evitadb.comenius.llm.LlmClient;
@@ -17,6 +18,8 @@ import io.evitadb.comenius.model.MarkdownDocument;
 import io.evitadb.comenius.model.TranslateIncrementalJob;
 import io.evitadb.comenius.model.TranslationJob;
 import io.evitadb.comenius.model.TranslationSummary;
+import io.evitadb.comenius.structure.TagVocabulary;
+import io.evitadb.comenius.structure.TagVocabularyDeriver;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.logging.Log;
@@ -27,6 +30,7 @@ import org.apache.maven.plugins.annotations.Parameter;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -41,6 +45,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Main Mojo for Comenius plugin providing actions:
@@ -49,6 +54,15 @@ import java.util.regex.Pattern;
  */
 @Mojo(name = "run", defaultPhase = LifecyclePhase.NONE, threadSafe = true)
 public class ComeniusMojo extends AbstractMojo {
+
+	/**
+	 * Identifies every translatable markdown document, independent of {@link #fileRegex}.
+	 * {@code fileRegex} scopes which files *this run* translates or fixes; link correction
+	 * needs to recognise the full corpus regardless of that scope, or else a narrow run (e.g.
+	 * translating a single file) mis-files every other real document as a non-translatable
+	 * asset, corrupting cross-document links and skipping external anchor staleness checks.
+	 */
+	private static final Pattern TRANSLATABLE_MARKDOWN_PATTERN = Pattern.compile("(?i).*\\.md");
 
 	/** Which action to perform: "show-config" or "translate". */
 	@Parameter(property = "comenius.action", defaultValue = "show-config")
@@ -124,8 +138,11 @@ public class ComeniusMojo extends AbstractMojo {
 			case "fix-links":
 				fixLinks(getLog());
 				break;
+			case "fix-structure":
+				fixStructure(getLog());
+				break;
 			default:
-				throw new MojoExecutionException("Unknown action: " + this.action + ". Supported actions: show-config, translate, check, fix-links");
+				throw new MojoExecutionException("Unknown action: " + this.action + ". Supported actions: show-config, translate, check, fix-links, fix-structure");
 		}
 	}
 
@@ -221,6 +238,59 @@ public class ComeniusMojo extends AbstractMojo {
 		return compiled;
 	}
 
+	/**
+	 * Derives a tag vocabulary from every markdown document under the source root, so that
+	 * {@link Translator} can repair tag-case drift, autofix untranslated leaf content, and run a
+	 * structural comparison beyond heading counts.
+	 *
+	 * Derivation is corpus-wide by design (see {@link TagVocabularyDeriver}): a tag name means the
+	 * same thing everywhere, or the whole point of auto-derivation collapses. A failure here
+	 * (an unbalanced tag introduced somewhere in the corpus) degrades to the prior behaviour -
+	 * {@code null}, meaning the new checks are skipped - rather than blocking the entire translate
+	 * action over files that may not even be affected.
+	 *
+	 * @param root the source directory root
+	 * @param log  the Maven log
+	 * @return the derived vocabulary, or {@code null} if derivation failed
+	 */
+	@Nullable
+	private static TagVocabulary deriveVocabulary(@Nonnull final Path root, @Nonnull final Log log) {
+		try {
+			final TagVocabularyDeriver deriver = new TagVocabularyDeriver();
+			try (Stream<Path> files = Files.walk(root)) {
+				files.filter(path -> path.getFileName().toString().endsWith(".md"))
+					.filter(path -> {
+						final String text = path.toString();
+						return !text.contains("/examples/") && !text.contains("/example/")
+							&& !text.contains("/assets/");
+					})
+					.sorted()
+					.forEach(path -> {
+						try {
+							deriver.add(
+								root.relativize(path).toString(),
+								new MarkdownDocument(
+									new String(Files.readAllBytes(path), StandardCharsets.UTF_8)
+								).getBodyContent()
+							);
+						} catch (final IOException exception) {
+							throw new UncheckedIOException(exception);
+						}
+					});
+			}
+			return deriver.derive(
+				Set.of("Table", "Thead", "Tbody", "Tr", "CodeTabs", "CodeTabsBlock", "SourceCodeTabs"),
+				Set.of("SourceClass", "MDInclude", "dt", "dd"), false
+			);
+		} catch (final RuntimeException | IOException exception) {
+			log.warn(
+				"Tag vocabulary derivation failed, tag-case repair / untranslated-content autofix /" +
+					" structural comparison are disabled for this run: " + exception.getMessage()
+			);
+			return null;
+		}
+	}
+
 	private void translate(@Nonnull final Log log) {
 		// Validate required parameters
 		if (this.sourceDir == null || this.sourceDir.isBlank()) {
@@ -261,7 +331,8 @@ public class ComeniusMojo extends AbstractMojo {
 				// LangChain4j handles retry logic internally
 				final LlmClient llmClient = new LlmClient(chatModel);
 				final PromptLoader promptLoader = new PromptLoader();
-				translator = new Translator(llmClient, promptLoader, translationPool, log);
+				final TagVocabulary vocabulary = deriveVocabulary(root, log);
+				translator = new Translator(llmClient, promptLoader, translationPool, log, vocabulary);
 				executor = new TranslationExecutor(translationPool, translator, new Writer(), log, root);
 				executor.setCustomFrontMatter(this.customFrontMatter);
 			}
@@ -357,7 +428,7 @@ public class ComeniusMojo extends AbstractMojo {
 						log.info("--- Link Correction Phase ---");
 						final Set<Path> translatedFiles = executor.getSuccessfullyTranslatedFiles();
 						correctLinksInTranslatedFiles(
-							log, root, targetDir, pattern, exclusionPatterns,
+							log, root, targetDir, TRANSLATABLE_MARKDOWN_PATTERN, exclusionPatterns,
 							translatedFiles, gitService, gitRoot, executor.getExecutor()
 						);
 
@@ -365,7 +436,7 @@ public class ComeniusMojo extends AbstractMojo {
 						final Map<Path, AnchorChangeSet> anchorChanges = executor.getAnchorChanges();
 						if (!anchorChanges.isEmpty()) {
 							correctExternalAnchors(
-								log, targetDir, pattern, exclusionPatterns,
+								log, targetDir, TRANSLATABLE_MARKDOWN_PATTERN, exclusionPatterns,
 								anchorChanges, translatedFiles, executor.getExecutor()
 							);
 						}
@@ -428,27 +499,46 @@ public class ComeniusMojo extends AbstractMojo {
 
 			// Report results
 			log.info("Checked " + fileCount.get() + " files");
+			reportCheckResult(log, root, result);
 
-			if (!result.gitErrors().isEmpty()) {
-				log.error("Git status errors: " + result.gitErrors().size());
-				for (final GitError error : result.gitErrors()) {
-					final Path relativePath = root.relativize(error.file());
-					log.error("  " + error.type() + ": " + relativePath);
+			// Translated trees are documents in their own right - their links can rot exactly
+			// like the source ones, and until they are checked too a green run says nothing
+			// about them. Each target is checked against itself, so a Czech document linking to
+			// a Czech anchor is validated in Czech.
+			int targetErrors = 0;
+			if (this.targets != null) {
+				for (final Target target : this.targets) {
+					if (target == null || target.getLocale() == null || target.getTargetDir() == null) {
+						log.warn("Skipping incomplete target configuration");
+						continue;
+					}
+					final Locale locale = Locale.forLanguageTag(target.getLocale());
+					final Path targetDir = Path.of(target.getTargetDir()).toAbsolutePath().normalize();
+					if (!Files.exists(targetDir) || !Files.isDirectory(targetDir)) {
+						log.warn("Target directory does not exist, skipping: " + targetDir);
+						continue;
+					}
+
+					final ContentChecker targetChecker = new ContentChecker(gitService, targetDir, gitRoot);
+					final AtomicInteger targetFileCount = new AtomicInteger(0);
+					final Visitor targetVisitor = (file, content, instructions) -> {
+						targetChecker.checkFile(file, content);
+						targetFileCount.incrementAndGet();
+					};
+					new Traverser(targetDir, pattern, exclusionPatterns, targetVisitor).traverse();
+
+					final CheckResult targetResult = targetChecker.getResult();
+					log.info("=== Checked " + targetFileCount.get() + " files for: " +
+						locale.getDisplayName() + " (" + locale.toLanguageTag() + ") in " + targetDir + " ===");
+					reportCheckResult(log, targetDir, targetResult);
+					targetErrors += targetResult.errorCount();
 				}
 			}
 
-			if (!result.linkErrors().isEmpty()) {
-				log.error("Link validation errors: " + result.linkErrors().size());
-				for (final LinkError error : result.linkErrors()) {
-					final Path relativePath = root.relativize(error.sourceFile());
-					log.error("  " + relativePath + ": " + error.linkDestination() +
-						" (" + error.type() + ")");
-				}
-			}
-
-			if (!result.isSuccess()) {
+			final int totalErrors = result.errorCount() + targetErrors;
+			if (totalErrors > 0) {
 				throw new MojoExecutionException(
-					"Check failed with " + result.errorCount() + " error(s)"
+					"Check failed with " + totalErrors + " error(s)"
 				);
 			}
 
@@ -528,14 +618,14 @@ public class ComeniusMojo extends AbstractMojo {
 
 					// Run link correction
 					final LinkCorrector corrector = new LinkCorrector(
-						root, targetDir, pattern, exclusionPatterns,
+						root, targetDir, TRANSLATABLE_MARKDOWN_PATTERN, exclusionPatterns,
 						this.translatableFrontMatterFields, log
 					);
 
 					final List<LinkCorrectionResult> results = corrector.correctAllParallel(filesToProcess, pool);
 
 					// Write corrected files
-					writeCorrectedFiles(log, results);
+					writeCorrectedFiles(log, results, this.dryRun);
 
 					// Validation phase
 					validateCorrectedLinks(log, targetDir, results, gitService, gitRoot);
@@ -546,6 +636,140 @@ public class ComeniusMojo extends AbstractMojo {
 
 		} catch (final IOException ex) {
 			throw new MojoExecutionException("Fix-links action failed: " + ex.getMessage(), ex);
+		}
+	}
+
+	/**
+	 * Logs the git and link errors of a single checked tree.
+	 *
+	 * @param log    the Maven log
+	 * @param root   the tree the errors are reported relative to
+	 * @param result the check outcome for that tree
+	 */
+	private static void reportCheckResult(
+		@Nonnull Log log,
+		@Nonnull Path root,
+		@Nonnull CheckResult result
+	) {
+		if (!result.gitErrors().isEmpty()) {
+			log.error("Git status errors: " + result.gitErrors().size());
+			for (final GitError error : result.gitErrors()) {
+				log.error("  " + error.type() + ": " + root.relativize(error.file()));
+			}
+		}
+		if (!result.linkErrors().isEmpty()) {
+			log.error("Link validation errors: " + result.linkErrors().size());
+			for (final LinkError error : result.linkErrors()) {
+				log.error("  " + root.relativize(error.sourceFile()) + ": " + error.linkDestination() +
+					" (" + error.type() + ")");
+			}
+		}
+	}
+
+	/**
+	 * Executes the fix-structure action: restores headings in translated documents that a
+	 * markdown parser no longer recognises because the blank line in front of them is missing.
+	 *
+	 * Runs no LLM calls and changes no wording - the only edit ever made is the insertion of a
+	 * blank line, and only when re-parsing proves it brings a heading back. With
+	 * {@code -Dcomenius.dryRun=true} nothing is written at all, which makes this usable as a
+	 * read-only report on the structural health of the translated corpus.
+	 *
+	 * This must run before {@code fix-links}: anchors are mapped by heading position, so while
+	 * a heading is still swallowed every later anchor in that document is off by one and link
+	 * correction would confidently write the wrong target.
+	 *
+	 * @param log the Maven log
+	 * @throws MojoExecutionException if the action fails
+	 */
+	private void fixStructure(@Nonnull final Log log) throws MojoExecutionException {
+		if (this.targets == null || this.targets.isEmpty()) {
+			log.error("At least one target must be specified for fix-structure action");
+			throw new MojoExecutionException("No targets specified");
+		}
+
+		final Pattern pattern = Pattern.compile(this.fileRegex);
+		final List<Pattern> exclusionPatterns = compileExclusionPatterns(this.excludedFilePatterns);
+		final Writer writer = new Writer();
+
+		int totalRepairs = 0;
+		int repairedFiles = 0;
+		int unrepairedFiles = 0;
+		int writeErrors = 0;
+
+		try {
+			for (final Target target : this.targets) {
+				if (target == null || target.getLocale() == null || target.getTargetDir() == null) {
+					log.warn("Skipping incomplete target configuration");
+					continue;
+				}
+
+				final Locale locale = Locale.forLanguageTag(target.getLocale());
+				final Path targetDir = Path.of(target.getTargetDir()).toAbsolutePath().normalize();
+				if (!Files.exists(targetDir) || !Files.isDirectory(targetDir)) {
+					log.warn("Target directory does not exist, skipping: " + targetDir);
+					continue;
+				}
+
+				log.info("=== Repairing structure for: " + locale.getDisplayName() +
+					" (" + locale.toLanguageTag() + ") in " + targetDir + " ===");
+
+				final Map<Path, String> filesToProcess = new HashMap<>();
+				final Visitor collectingVisitor = (file, content, instructions) -> filesToProcess.put(file, content);
+				new Traverser(targetDir, pattern, exclusionPatterns, collectingVisitor).traverse();
+				log.info("Found " + filesToProcess.size() + " files to inspect");
+
+				for (final Map.Entry<Path, String> entry : filesToProcess.entrySet()) {
+					final Path file = entry.getKey();
+					final MarkdownDocument document = new MarkdownDocument(entry.getValue());
+					final StructureRepairer.Result result = StructureRepairer.repair(document.getBodyContent());
+
+					if (!result.unrepaired().isEmpty()) {
+						unrepairedFiles++;
+						log.warn(targetDir.relativize(file) + ": " + result.unrepaired().size() +
+							" heading(s) not recognised by a markdown parser that a blank line does not" +
+							" fix, needs a human look: " + result.unrepaired());
+					}
+					if (!result.isModified()) {
+						continue;
+					}
+
+					repairedFiles++;
+					totalRepairs += result.repairs().size();
+					for (final StructureRepairer.Repair repair : result.repairs()) {
+						log.info((this.dryRun ? "[DRY-RUN] would restore " : "restored ") +
+							targetDir.relativize(file) + ":" + repair.lineNumber() +
+							" \"" + repair.headingText() + "\"");
+					}
+
+					if (!this.dryRun) {
+						try {
+							// rebuild the file from its own front matter plus the repaired body,
+							// the same way corrected links are written back
+							writer.write(
+								new MarkdownDocument(document.serializeFrontMatter() + result.content()),
+								file
+							);
+						} catch (IOException e) {
+							log.error("Failed to write repaired file " + file + ": " + e.getMessage());
+							writeErrors++;
+						}
+					}
+				}
+			}
+		} catch (final IOException ex) {
+			throw new MojoExecutionException("Fix-structure action failed: " + ex.getMessage(), ex);
+		}
+
+		log.info("Structure repairs: " + totalRepairs + " heading(s) in " + repairedFiles + " file(s)");
+		if (unrepairedFiles > 0) {
+			log.warn("Files with headings a blank line cannot restore: " + unrepairedFiles);
+		}
+		if (this.dryRun) {
+			log.info("[DRY-RUN] nothing was written; re-run without -Dcomenius.dryRun=true to apply");
+		}
+		if (writeErrors > 0) {
+			throw new MojoExecutionException("Fix-structure failed to write " + writeErrors + " file(s)");
 		}
 	}
 
@@ -617,7 +841,7 @@ public class ComeniusMojo extends AbstractMojo {
 		final List<LinkCorrectionResult> results = corrector.correctAllParallel(filesWithContent, executor);
 
 		// Write corrected files
-		writeCorrectedFiles(log, results);
+		writeCorrectedFiles(log, results, this.dryRun);
 
 		// Validation phase
 		validateCorrectedLinks(log, targetDir, results, gitService, gitRoot);
@@ -685,7 +909,7 @@ public class ComeniusMojo extends AbstractMojo {
 		);
 
 		// Write corrected files using existing infrastructure
-		writeCorrectedFiles(log, results);
+		writeCorrectedFiles(log, results, this.dryRun);
 	}
 
 	/**
@@ -693,12 +917,14 @@ public class ComeniusMojo extends AbstractMojo {
 	 *
 	 * @param log     Maven log for output
 	 * @param results the link correction results to write
+	 * @param dryRun  when true, report what would change without touching any file
 	 * @return array of [totalCorrections, filesWithCorrections, correctionErrors]
 	 */
 	@Nonnull
 	private static int[] writeCorrectedFiles(
 		@Nonnull Log log,
-		@Nonnull List<LinkCorrectionResult> results
+		@Nonnull List<LinkCorrectionResult> results,
+		boolean dryRun
 	) {
 		final Writer writer = new Writer();
 		int totalCorrections = 0;
@@ -715,6 +941,13 @@ public class ComeniusMojo extends AbstractMojo {
 			}
 
 			if (result.totalCorrections() > 0) {
+				if (dryRun) {
+					filesWithCorrections++;
+					totalCorrections += result.totalCorrections();
+					log.info("[DRY-RUN] would correct " + result.totalCorrections() + " link(s) in "
+						+ result.targetFile());
+					continue;
+				}
 				try {
 					final MarkdownDocument doc = new MarkdownDocument(result.correctedContent());
 					writer.write(doc, result.targetFile());
@@ -727,6 +960,10 @@ public class ComeniusMojo extends AbstractMojo {
 					correctionErrors++;
 				}
 			}
+		}
+
+		if (dryRun) {
+			log.info("[DRY-RUN] nothing was written; re-run without -Dcomenius.dryRun=true to apply");
 		}
 
 		log.info("Link corrections: " + totalCorrections + " in " + filesWithCorrections + " files");
