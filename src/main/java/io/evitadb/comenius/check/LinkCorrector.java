@@ -287,9 +287,9 @@ public final class LinkCorrector {
 			return destination;
 		}
 
-		// Skip absolute links
+		// Absolute links are not rewritten, but they are checked for one specific corruption
 		if (linkInfo.isAbsolute()) {
-			return destination;
+			return correctAbsoluteLink(linkInfo, context);
 		}
 
 		// Handle anchor-only links within the same document
@@ -299,6 +299,83 @@ public final class LinkCorrector {
 
 		// Handle links with paths
 		return correctPathLink(linkInfo, context);
+	}
+
+	/**
+	 * Leaves an absolute link alone unless it points into the target tree at something that
+	 * only exists in the source tree, in which case it is sent back to the source tree.
+	 *
+	 * <p>Absolute links in this corpus address files that are never translated - code examples,
+	 * generated query results, images - and therefore always live under the source tree. A
+	 * translation model reading {@code /documentation/user/en/...} sees a path segment that
+	 * looks like a language and helpfully "translates" it, producing
+	 * {@code /documentation/user/cs/...} for a file that was never copied there. The link is
+	 * then dead, and because the destination is absolute nothing downstream questioned it.</p>
+	 *
+	 * <p>The repair is deliberately narrow: a link is only rewritten when the file is missing
+	 * where it points and present at the same relative path under the source tree. An absolute
+	 * link that resolves is never touched, so the many legitimate source-tree links are left
+	 * exactly as they are.</p>
+	 *
+	 * @param linkInfo the parsed link info
+	 * @param context  the correction context
+	 * @return the original destination, or one pointing back into the source tree
+	 */
+	@Nonnull
+	private String correctAbsoluteLink(
+		@Nonnull LinkInfo linkInfo,
+		@Nonnull CorrectionContext context
+	) {
+		final String destination = linkInfo.destination();
+		final String path = linkInfo.path();
+		if (path == null || path.isBlank()) {
+			return destination;
+		}
+
+		// Match the link against the tail of the target directory, e.g. a link starting with
+		// "/documentation/user/cs/" against a target directory ".../documentation/user/cs".
+		final String targetPrefix = repositoryRelativePrefix(this.targetDir);
+		if (targetPrefix == null || !path.startsWith(targetPrefix + "/")) {
+			return destination;
+		}
+
+		final String relative = path.substring(targetPrefix.length() + 1);
+		if (Files.exists(this.targetDir.resolve(relative))) {
+			// points at something that really is in the translated tree
+			return destination;
+		}
+		if (!Files.exists(this.sourceDir.resolve(relative))) {
+			// missing on both sides - not this method's problem to guess about
+			return destination;
+		}
+
+		final String sourcePrefix = repositoryRelativePrefix(this.sourceDir);
+		if (sourcePrefix == null) {
+			return destination;
+		}
+		final String corrected = sourcePrefix + "/" + relative;
+		this.log.info("Absolute link '" + path + "' points into the translated tree at a file"
+			+ " that only exists in the source tree, corrected to '" + corrected + "'");
+		context.assetCorrections++;
+		final String anchor = linkInfo.anchor();
+		return anchor == null || anchor.isEmpty() ? corrected : corrected + "#" + anchor;
+	}
+
+	/**
+	 * Renders the trailing {@code documentation/user/<locale>} style portion of a directory the
+	 * way absolute links in the corpus spell it, i.e. rooted at the repository with a leading
+	 * slash. Absolute links are repository-relative, so only this tail can be compared.
+	 *
+	 * @param directory the source or target directory
+	 * @return the prefix an absolute link to this directory starts with, or null when unknown
+	 */
+	@Nullable
+	private static String repositoryRelativePrefix(@Nonnull Path directory) {
+		final int nameCount = directory.getNameCount();
+		if (nameCount < 3) {
+			return null;
+		}
+		return "/" + directory.subpath(nameCount - 3, nameCount).toString().replace('\\', '/');
 	}
 
 	/**

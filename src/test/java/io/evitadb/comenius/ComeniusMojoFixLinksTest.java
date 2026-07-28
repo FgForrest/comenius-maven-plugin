@@ -405,4 +405,68 @@ public class ComeniusMojoFixLinksTest {
 		@Override
 		public void error(Throwable error) { this.errorMessages.add(error.getMessage()); }
 	}
+
+	@Test
+	@DisplayName("sends an absolute link back to the source tree when the file only exists there")
+	public void shouldReturnLocalisedAssetLinkToTheSourceTree() throws Exception {
+		// Real regression: example and generated-result files are never translated, so they
+		// only exist under the source tree. A translation model reads
+		// "/documentation/user/en/..." , treats the "en" segment as a language, and rewrites it
+		// to "/documentation/user/cs/...", leaving a dead link nothing downstream questioned.
+		final Path enDir = this.tempDir.resolve("documentation/user/en");
+		final Path csDir = this.tempDir.resolve("documentation/user/cs");
+		Files.createDirectories(enDir);
+		Files.createDirectories(csDir);
+
+		writeFile(enDir, "examples/hierarchy-node.java", "class Example {}");
+		writeFile(enDir, "guide.md",
+			"# Guide\n\n[Example](/documentation/user/en/examples/hierarchy-node.java)");
+		writeFile(csDir, "guide.md",
+			"# Prirucka\n\n[Priklad](/documentation/user/cs/examples/hierarchy-node.java)");
+		runGit("add", ".");
+		runGit("commit", "-m", "Add docs");
+
+		this.mojo.setAction("fix-links");
+		this.mojo.setSourceDir(enDir.toString());
+		final List<ComeniusMojo.Target> targets = new ArrayList<>();
+		targets.add(new ComeniusMojo.Target("cs", csDir.toString()));
+		this.mojo.setTargets(targets);
+
+		assertDoesNotThrow(() -> this.mojo.execute());
+
+		final String corrected = readFile(csDir.resolve("guide.md"));
+		assertTrue(
+			corrected.contains("/documentation/user/en/examples/hierarchy-node.java"),
+			"link must point back at the source tree, got: " + corrected
+		);
+	}
+
+	@Test
+	@DisplayName("leaves an absolute link alone when it resolves in the translated tree")
+	public void shouldLeaveResolvableAbsoluteLinkUntouched() throws Exception {
+		final Path enDir = this.tempDir.resolve("documentation/user/en");
+		final Path csDir = this.tempDir.resolve("documentation/user/cs");
+		Files.createDirectories(enDir);
+		Files.createDirectories(csDir);
+
+		writeFile(enDir, "assets/diagram.png", "png");
+		writeFile(csDir, "assets/diagram.png", "png");
+		writeFile(enDir, "guide.md", "# Guide\n\n![D](/documentation/user/en/assets/diagram.png)");
+		writeFile(csDir, "guide.md", "# Prirucka\n\n![D](/documentation/user/cs/assets/diagram.png)");
+		runGit("add", ".");
+		runGit("commit", "-m", "Add docs");
+
+		this.mojo.setAction("fix-links");
+		this.mojo.setSourceDir(enDir.toString());
+		final List<ComeniusMojo.Target> targets = new ArrayList<>();
+		targets.add(new ComeniusMojo.Target("cs", csDir.toString()));
+		this.mojo.setTargets(targets);
+
+		assertDoesNotThrow(() -> this.mojo.execute());
+
+		assertTrue(
+			readFile(csDir.resolve("guide.md")).contains("/documentation/user/cs/assets/diagram.png"),
+			"an absolute link that resolves must not be rewritten"
+		);
+	}
 }
