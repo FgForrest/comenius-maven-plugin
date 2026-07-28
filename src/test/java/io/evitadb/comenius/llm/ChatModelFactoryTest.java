@@ -175,4 +175,29 @@ public class ChatModelFactoryTest {
 			ChatModelFactory.create(null, "https://example.com", "key", null)
 		);
 	}
+
+	@Test
+	@DisplayName("shouldOmitTemperatureWhenNull")
+	void shouldOmitTemperatureWhenNull() {
+		// current-generation reasoning models reject a custom temperature outright; passing null
+		// must build successfully without ever calling .temperature(...) on the model builder
+		final ChatModel openai = ChatModelFactory.create(
+			"openai", "https://api.openai.com/v1", "key", "gpt-5.6-luna", null
+		);
+		assertNotNull(openai);
+
+		final ChatModel anthropic = ChatModelFactory.create(
+			"anthropic", "https://api.anthropic.com", "key", "claude-sonnet-4-20250514", null
+		);
+		assertNotNull(anthropic);
+	}
+
+	@Test
+	@DisplayName("shouldAcceptExplicitTemperature")
+	void shouldAcceptExplicitTemperature() {
+		final ChatModel model = ChatModelFactory.create(
+			"openai", "https://api.openai.com/v1", "key", "gpt-4.1", 0.7
+		);
+		assertNotNull(model);
+	}
 }

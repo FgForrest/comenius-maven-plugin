@@ -47,6 +47,32 @@ public final class ChatModelFactory {
 		@Nullable String llmToken,
 		@Nullable String modelName
 	) {
+		return create(provider, llmUrl, llmToken, modelName, DEFAULT_TEMPERATURE);
+	}
+
+	/**
+	 * Creates a ChatModel for the given provider, endpoint URL, and API token, with an explicit
+	 * sampling temperature.
+	 *
+	 * @param provider    the provider name ("openai" or "anthropic")
+	 * @param llmUrl      the base URL of the LLM endpoint (e.g., "https://api.openai.com/v1")
+	 * @param llmToken    the API token/key for authentication (can be null for local endpoints)
+	 * @param modelName   the model name to use (can be null for defaults)
+	 * @param temperature the sampling temperature, or {@code null} to omit it and let the model
+	 *                    use its own default - current-generation reasoning models (the OpenAI
+	 *                    `gpt-5.6-*` family among them) reject any request that sets a custom
+	 *                    temperature at all
+	 * @return configured ChatModel instance
+	 * @throws IllegalArgumentException if provider is unknown or llmUrl is null/blank
+	 */
+	@Nonnull
+	public static ChatModel create(
+		@Nonnull String provider,
+		@Nonnull String llmUrl,
+		@Nullable String llmToken,
+		@Nullable String modelName,
+		@Nullable Double temperature
+	) {
 		Objects.requireNonNull(provider, "provider must not be null");
 		Objects.requireNonNull(llmUrl, "llmUrl must not be null");
 		if (llmUrl.isBlank()) {
@@ -57,8 +83,8 @@ public final class ChatModelFactory {
 		final String normalizedProvider = provider.toLowerCase().trim();
 
 		return switch (normalizedProvider) {
-			case PROVIDER_OPENAI -> createOpenAiModel(normalizedUrl, llmToken, modelName);
-			case PROVIDER_ANTHROPIC -> createAnthropicModel(normalizedUrl, llmToken, modelName);
+			case PROVIDER_OPENAI -> createOpenAiModel(normalizedUrl, llmToken, modelName, temperature);
+			case PROVIDER_ANTHROPIC -> createAnthropicModel(normalizedUrl, llmToken, modelName, temperature);
 			default -> throw new IllegalArgumentException(
 				"Unknown provider: " + provider + ". Supported providers: " + PROVIDER_OPENAI + ", " + PROVIDER_ANTHROPIC
 			);
@@ -68,24 +94,28 @@ public final class ChatModelFactory {
 	/**
 	 * Creates an OpenAI-compatible ChatModel.
 	 *
-	 * @param baseUrl   the base URL for the API
-	 * @param apiKey    the API key (can be null for local endpoints)
-	 * @param modelName the model name (null uses default)
+	 * @param baseUrl     the base URL for the API
+	 * @param apiKey      the API key (can be null for local endpoints)
+	 * @param modelName   the model name (null uses default)
+	 * @param temperature the sampling temperature, or null to omit it
 	 * @return configured OpenAiChatModel instance
 	 */
 	@Nonnull
 	private static ChatModel createOpenAiModel(
 		@Nonnull String baseUrl,
 		@Nullable String apiKey,
-		@Nullable String modelName
+		@Nullable String modelName,
+		@Nullable Double temperature
 	) {
 		final OpenAiChatModel.OpenAiChatModelBuilder builder = OpenAiChatModel.builder()
 			.baseUrl(baseUrl)
 			.modelName(modelName != null && !modelName.isBlank() ? modelName : DEFAULT_OPENAI_MODEL)
 			.timeout(DEFAULT_TIMEOUT)
-			.temperature(DEFAULT_TEMPERATURE)
 			.logRequests(false)
 			.logResponses(false);
+		if (temperature != null) {
+			builder.temperature(temperature);
+		}
 
 		// Token is optional for local endpoints like Ollama
 		if (apiKey != null && !apiKey.isBlank()) {
@@ -101,24 +131,28 @@ public final class ChatModelFactory {
 	/**
 	 * Creates an Anthropic ChatModel.
 	 *
-	 * @param baseUrl   the base URL for the API
-	 * @param apiKey    the API key
-	 * @param modelName the model name (null uses default)
+	 * @param baseUrl     the base URL for the API
+	 * @param apiKey      the API key
+	 * @param modelName   the model name (null uses default)
+	 * @param temperature the sampling temperature, or null to omit it
 	 * @return configured AnthropicChatModel instance
 	 */
 	@Nonnull
 	private static ChatModel createAnthropicModel(
 		@Nonnull String baseUrl,
 		@Nullable String apiKey,
-		@Nullable String modelName
+		@Nullable String modelName,
+		@Nullable Double temperature
 	) {
 		final AnthropicChatModel.AnthropicChatModelBuilder builder = AnthropicChatModel.builder()
 			.baseUrl(baseUrl)
 			.modelName(modelName != null && !modelName.isBlank() ? modelName : DEFAULT_ANTHROPIC_MODEL)
 			.timeout(DEFAULT_TIMEOUT)
-			.temperature(DEFAULT_TEMPERATURE)
 			.logRequests(false)
 			.logResponses(false);
+		if (temperature != null) {
+			builder.temperature(temperature);
+		}
 
 		if (apiKey != null && !apiKey.isBlank()) {
 			builder.apiKey(apiKey);
