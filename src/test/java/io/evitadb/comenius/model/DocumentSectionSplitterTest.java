@@ -1,9 +1,13 @@
 package io.evitadb.comenius.model;
 
+import io.evitadb.comenius.structure.MarkupScanner;
+import io.evitadb.comenius.structure.TagBalance;
+import io.evitadb.comenius.structure.TagVocabulary;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -257,5 +261,170 @@ public class DocumentSectionSplitterTest {
 		assertDoesNotThrow(() ->
 			DocumentSectionSplitter.validateHeadingStructure(empty, empty)
 		);
+	}
+
+	// --- vocabulary-aware splitting: split(String, TagVocabulary) ---
+
+	private static final TagVocabulary VOCABULARY = TagVocabulary.of(
+		Set.of("LS", "Note", "NoteTitle"), Set.of(), Set.of(), false
+	);
+
+	@Test
+	@DisplayName("shouldFallBackToPlainSplitWhenVocabularyIsNull")
+	void shouldFallBackToPlainSplitWhenVocabularyIsNull() {
+		final String body = "# Title\n\n<LS to=\"e\">\n\n## Heading\n\nContent.\n\n</LS>\n";
+
+		final List<DocumentSection> withoutVocabulary = DocumentSectionSplitter.split(body);
+		final List<DocumentSection> nullVocabulary = DocumentSectionSplitter.split(body, null);
+
+		assertEquals(withoutVocabulary, nullVocabulary);
+	}
+
+	@Test
+	@DisplayName("shouldAbsorbTagThatOpensImmediatelyBeforeAHeadingIntoThatHeadingsSection")
+	void shouldAbsorbTagThatOpensImmediatelyBeforeAHeadingIntoThatHeadingsSection() {
+		// mirrors the real get-started/query-our-dataset.md defect: <LS> opens right before a
+		// heading, closes before the next one - naive heading-offset splitting strands the open
+		// tag in the previous section.
+		final String body = "## Run your own server\n\nSome content.\n\n"
+			+ "<LS to=\"e,j\">\n\n## Connect the Java client\n\nJava content.\n\n</LS>\n\n"
+			+ "<LS to=\"c\">\n\n## Connect the C# client\n\nC# content.\n\n</LS>\n";
+
+		final List<DocumentSection> sections = DocumentSectionSplitter.split(body, VOCABULARY);
+
+		assertEquals(3, sections.size());
+		assertFalse(sections.get(0).content().contains("<LS"));
+		assertTrue(sections.get(1).content().contains("<LS to=\"e,j\">"));
+		assertTrue(sections.get(1).content().contains("</LS>"));
+		assertEquals("Connect the Java client", sections.get(1).headingText());
+		assertTrue(sections.get(2).content().contains("<LS to=\"c\">"));
+		assertTrue(sections.get(2).content().contains("</LS>"));
+		assertEquals("Connect the C# client", sections.get(2).headingText());
+	}
+
+	@Test
+	@DisplayName("shouldKeepNoteWithHeadingAsItsOwnTitleInOneSection")
+	void shouldKeepNoteWithHeadingAsItsOwnTitleInOneSection() {
+		// mirrors the real query/requirements/hierarchy.md defect: a heading is used as a Note's
+		// own title, nested directly inside <Note><NoteTitle> - naive splitting cuts right at
+		// that heading, tearing the enclosing Note in half.
+		final String body = "## Level\n\n<Note type=\"info\">\n\nIntro content.\n\n</Note>\n\n"
+			+ "<Note type=\"info\">\n\n<NoteTitle toggles=\"true\">\n"
+			+ "##### Why would I use this?\n</NoteTitle>\n\nExplanation.\n\n</Note>\n\n"
+			+ "## Next Section\n\nMore content.\n";
+
+		final List<DocumentSection> sections = DocumentSectionSplitter.split(body, VOCABULARY);
+
+		final DocumentSection noteSection = sections.stream()
+			.filter(s -> s.content().contains("Why would I use this?"))
+			.findFirst()
+			.orElseThrow();
+		assertTrue(noteSection.content().contains("<Note type=\"info\">"));
+		assertTrue(noteSection.content().contains("<NoteTitle toggles=\"true\">"));
+		assertTrue(noteSection.content().contains("</NoteTitle>"));
+		assertTrue(noteSection.content().contains("</Note>"));
+
+		for (final DocumentSection section : sections) {
+			assertTrue(
+				TagBalance.match(
+					new MarkupScanner(VOCABULARY).scan(section.content())
+				).isBalanced(),
+				"section not self-balanced: " + section.content()
+			);
+		}
+	}
+
+	@Test
+	@DisplayName("shouldMergeHeadingsForwardWhenATagWrapsMultipleHeadings")
+	void shouldMergeHeadingsForwardWhenATagWrapsMultipleHeadings() {
+		// a single wrapper spanning two headings - the shift-back rule alone cannot fix this
+		// (there is no dangling open immediately before the second heading), so the boundary at
+		// the second heading must be dropped and the section grown until it closes.
+		final String body = "<LS to=\"e\">\n\n## First\n\nContent A.\n\n## Second\n\nContent B.\n\n</LS>\n\n"
+			+ "## Third\n\nContent C.\n";
+
+		final List<DocumentSection> sections = DocumentSectionSplitter.split(body, VOCABULARY);
+
+		assertEquals(2, sections.size());
+		assertTrue(sections.get(0).content().contains("## First"));
+		assertTrue(sections.get(0).content().contains("## Second"));
+		assertTrue(sections.get(0).content().contains("</LS>"));
+		assertEquals("Third", sections.get(1).headingText());
+
+		for (final DocumentSection section : sections) {
+			assertTrue(
+				TagBalance.match(
+					new MarkupScanner(VOCABULARY).scan(section.content())
+				).isBalanced(),
+				"section not self-balanced: " + section.content()
+			);
+		}
+	}
+
+	@Test
+	@DisplayName("does not split on shell comments inside a fenced code block")
+	void shouldNotTreatFencedCommentsAsHeadings() {
+		// "# run in foreground" is a shell comment, not a heading - splitting there would cut
+		// the section in half through the middle of the code fence.
+		final String body = "## Docker\n\nRun it:\n\n"
+			+ "```bash\n"
+			+ "# run in foreground, destroy the container on exit\n"
+			+ "## also just a comment\n"
+			+ "docker run evitadb\n"
+			+ "```\n\n"
+			+ "## Configuration\n\nContent.\n";
+
+		final List<DocumentSection> sections = DocumentSectionSplitter.split(body);
+
+		assertEquals(2, sections.size(), "fenced comments must not open new sections");
+		assertEquals("Docker", sections.get(0).headingText());
+		assertEquals("Configuration", sections.get(1).headingText());
+		assertTrue(
+			sections.get(0).content().contains("docker run evitadb"),
+			"the code fence must stay intact inside its section"
+		);
+	}
+
+	@Test
+	@DisplayName("does not split on fenced comments in the vocabulary-aware overload either")
+	void shouldNotTreatFencedCommentsAsHeadingsWithVocabulary() {
+		final String body = "## Docker\n\nRun it:\n\n"
+			+ "```bash\n"
+			+ "# run in foreground\n"
+			+ "docker run evitadb\n"
+			+ "```\n\n"
+			+ "## Configuration\n\nContent.\n";
+
+		final List<DocumentSection> sections = DocumentSectionSplitter.split(body, VOCABULARY);
+
+		assertEquals(2, sections.size(), "fenced comments must not open new sections");
+		assertEquals("Docker", sections.get(0).headingText());
+		assertEquals("Configuration", sections.get(1).headingText());
+	}
+
+	@Test
+	@DisplayName("still splits on a heading that follows a closed code fence")
+	void shouldSplitOnHeadingAfterFenceIsClosed() {
+		final String body = "## One\n\n```\n# not a heading\n```\n\n## Two\n\nContent.\n";
+
+		final List<DocumentSection> sections = DocumentSectionSplitter.split(body);
+
+		assertEquals(2, sections.size());
+		assertEquals("One", sections.get(0).headingText());
+		assertEquals("Two", sections.get(1).headingText());
+	}
+
+	@Test
+	@DisplayName("treats a shorter inner fence marker as content, not as a fence terminator")
+	void shouldRequireClosingFenceAtLeastAsLongAsTheOpeningOne() {
+		// The ``` line inside a ````-fenced block does not close it, so the heading-looking
+		// line after it is still fenced content.
+		final String body = "## One\n\n````\n```\n# still fenced\n```\n````\n\n## Two\n\nContent.\n";
+
+		final List<DocumentSection> sections = DocumentSectionSplitter.split(body);
+
+		assertEquals(2, sections.size());
+		assertEquals("One", sections.get(0).headingText());
+		assertEquals("Two", sections.get(1).headingText());
 	}
 }
