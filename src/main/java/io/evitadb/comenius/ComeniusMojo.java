@@ -10,6 +10,7 @@ import io.evitadb.comenius.check.LinkCorrector;
 import io.evitadb.comenius.check.LinkCorrectionResult;
 import io.evitadb.comenius.check.LinkError;
 import io.evitadb.comenius.check.StructureRepairer;
+import io.evitadb.comenius.diagnostics.TranslationFailureArtifacts;
 import io.evitadb.comenius.git.GitService;
 import io.evitadb.comenius.llm.ChatModelFactory;
 import io.evitadb.comenius.llm.LlmClient;
@@ -120,6 +121,13 @@ public class ComeniusMojo extends AbstractMojo {
 	@Parameter(property = "comenius.customFrontMatter")
 	private Map<String, String> customFrontMatter;
 
+	/**
+	 * Directory to keep rejected translations in, so a refusal can be diagnosed without paying for
+	 * another run. Set to blank to discard them instead.
+	 */
+	@Parameter(property = "comenius.failureDir", defaultValue = "${project.build.directory}/comenius-failures")
+	private String failureDir;
+
 	@Override
 	public void execute() throws MojoExecutionException {
 		if (this.action == null || this.action.isBlank()) {
@@ -202,6 +210,8 @@ public class ComeniusMojo extends AbstractMojo {
 		log.info(" - limit: " + this.limit);
 		log.info(" - dryRun: " + this.dryRun);
 		log.info(" - parallelism: " + this.parallelism);
+		log.info(" - failureDir: " + (this.failureDir == null || this.failureDir.isBlank()
+			? "<disabled, rejected translations are discarded>" : this.failureDir));
 		if (this.excludedFilePatterns == null || this.excludedFilePatterns.isEmpty()) {
 			log.info(" - excludedFilePatterns: <none>");
 		} else {
@@ -350,7 +360,13 @@ public class ComeniusMojo extends AbstractMojo {
 				final LlmClient llmClient = new LlmClient(chatModel);
 				final PromptLoader promptLoader = new PromptLoader();
 				final TagVocabulary vocabulary = deriveVocabulary(root, log);
-				translator = new Translator(llmClient, promptLoader, translationPool, log, vocabulary);
+				final TranslationFailureArtifacts failureArtifacts =
+					this.failureDir == null || this.failureDir.isBlank()
+						? null
+						: new TranslationFailureArtifacts(Path.of(this.failureDir));
+				translator = new Translator(
+					llmClient, promptLoader, translationPool, log, vocabulary, failureArtifacts
+				);
 				executor = new TranslationExecutor(translationPool, translator, new Writer(), log, root);
 				executor.setCustomFrontMatter(this.customFrontMatter);
 			}

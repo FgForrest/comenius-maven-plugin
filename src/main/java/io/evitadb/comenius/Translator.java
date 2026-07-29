@@ -8,6 +8,7 @@ import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.output.TokenUsage;
 import io.evitadb.comenius.check.HeadingAnchorIndex;
+import io.evitadb.comenius.diagnostics.TranslationFailureArtifacts;
 import io.evitadb.comenius.llm.LlmClient;
 import io.evitadb.comenius.llm.PromptLoader;
 import io.evitadb.comenius.model.DocumentChunk;
@@ -35,9 +36,12 @@ import org.apache.maven.plugin.logging.Log;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -76,6 +80,8 @@ public class Translator {
 	private final DocumentSplitter documentSplitter;
 	@Nullable
 	private final TagVocabulary vocabulary;
+	@Nullable
+	private final TranslationFailureArtifacts failureArtifacts;
 	private final AtomicLong inputTokenCount = new AtomicLong(0);
 	private final AtomicLong outputTokenCount = new AtomicLong(0);
 
@@ -121,12 +127,40 @@ public class Translator {
 		@Nullable Log log,
 		@Nullable TagVocabulary vocabulary
 	) {
+		this(llmClient, promptLoader, executor, log, vocabulary, null);
+	}
+
+	/**
+	 * Create a Translator that additionally keeps a copy of every translation its structural gates
+	 * reject.
+	 *
+	 * A rejection is the point at which the model's output is discarded, and with it the only
+	 * evidence of what went wrong; the next look at the problem then costs another paid run. Pass a
+	 * writer to keep the source, the attempts and the reasons on disk instead, or `null` to keep
+	 * exactly the prior behaviour.
+	 *
+	 * @param llmClient        non-null LLM client to use
+	 * @param promptLoader     non-null prompt loader for loading templates
+	 * @param executor         executor for async operations; may be null to use common pool
+	 * @param log              Maven log for diagnostic messages; may be null
+	 * @param vocabulary       corpus-derived tag vocabulary; may be null to skip the new checks
+	 * @param failureArtifacts writer for rejected translations; may be null to discard them
+	 */
+	public Translator(
+		@Nonnull LlmClient llmClient,
+		@Nonnull PromptLoader promptLoader,
+		@Nullable Executor executor,
+		@Nullable Log log,
+		@Nullable TagVocabulary vocabulary,
+		@Nullable TranslationFailureArtifacts failureArtifacts
+	) {
 		this.llmClient = Objects.requireNonNull(llmClient, "llmClient must not be null");
 		this.promptLoader = Objects.requireNonNull(promptLoader, "promptLoader must not be null");
 		this.executor = executor;
 		this.log = log;
 		this.documentSplitter = new DocumentSplitter();
 		this.vocabulary = vocabulary;
+		this.failureArtifacts = failureArtifacts;
 	}
 
 	/**
@@ -437,9 +471,78 @@ public class Translator {
 
 		final List<String> problems = StructuralComparator.compare(tagVocabulary, sourceBody, autofixed);
 		if (!problems.isEmpty()) {
+			final Map<String, String> attachments = new LinkedHashMap<>();
+			attachments.put("source.md", sourceBody);
+			attachments.put("response.md", llmResponse);
+			attachments.put("after-repair.md", autofixed);
+			recordFailure(job, "body", problems, attachments);
 			throw new StructuralMismatchException(problems);
 		}
 		return autofixed;
+	}
+
+	/**
+	 * Keeps a body that was rejected only after its sections had been joined back together.
+	 *
+	 * These failures are the interesting ones: every individual section passed its own gate, so
+	 * whatever went wrong was introduced by the join or is only visible across section boundaries.
+	 * The joined body next to its source is exactly what is needed to tell those apart.
+	 *
+	 * @param job        the job whose translation was rejected
+	 * @param sourceBody the source body the translation was compared against
+	 * @param joinedBody the rejected translation, with all sections joined
+	 * @param reason     why the translation was rejected
+	 */
+	private void recordJoinedBodyFailure(
+		@Nonnull TranslationJob job,
+		@Nonnull String sourceBody,
+		@Nonnull String joinedBody,
+		@Nonnull String reason
+	) {
+		final Map<String, String> attachments = new LinkedHashMap<>();
+		attachments.put("source.md", sourceBody);
+		attachments.put("joined.md", joinedBody);
+		recordFailure(job, "joined-body", List.of(reason), attachments);
+	}
+
+	/**
+	 * Keeps a rejected translation on disk, when a failure-artifact writer is configured.
+	 *
+	 * Diagnostics must never be the reason a translation run dies, so a failure to write them is
+	 * reported and then swallowed - reported, though, never silently dropped: an artifact that was
+	 * expected and is not there would send the next investigation down the wrong path.
+	 *
+	 * @param job         the job whose translation was rejected
+	 * @param unit        identifies the failing unit within the document
+	 * @param reasons     why the translation was rejected
+	 * @param attachments the texts to keep, keyed by file name
+	 */
+	private void recordFailure(
+		@Nonnull TranslationJob job,
+		@Nonnull String unit,
+		@Nonnull List<String> reasons,
+		@Nonnull Map<String, String> attachments
+	) {
+		if (this.failureArtifacts == null) {
+			return;
+		}
+		try {
+			final Path written = this.failureArtifacts.record(
+				job.getLocale(), job.getSourceFile(), unit, reasons, attachments
+			);
+			if (this.log != null) {
+				this.log.warn(
+					"Rejected translation of " + job.getSourceFile() + " [" + unit + "] kept at " + written
+				);
+			}
+		} catch (IOException e) {
+			if (this.log != null) {
+				this.log.warn(
+					"Could not keep the rejected translation of " + job.getSourceFile() +
+						" [" + unit + "]: " + e.getMessage()
+				);
+			}
+		}
 	}
 
 	/**
@@ -809,6 +912,7 @@ public class Translator {
 			try {
 				validateHeadingStructure(job, joinedBody);
 			} catch (HeadingStructureMismatchException e) {
+				recordJoinedBodyFailure(job, newSourceDoc.getBodyContent(), joinedBody, e.getMessage());
 				return currentResult.withFailure("BODY", e.getMessage(), state.totalElapsedMillis);
 			}
 
@@ -828,10 +932,10 @@ public class Translator {
 								") - failing rather than writing corrupted output."
 						);
 					}
-					return currentResult.withFailure(
-						"BODY", "Joined incremental translation has unbalanced tags: " + balance.pairedNames(),
-						state.totalElapsedMillis
-					);
+					final String unbalanced =
+						"Joined incremental translation has unbalanced tags: " + balance.pairedNames();
+					recordJoinedBodyFailure(job, newSourceDoc.getBodyContent(), joinedBody, unbalanced);
+					return currentResult.withFailure("BODY", unbalanced, state.totalElapsedMillis);
 				}
 			}
 
@@ -863,11 +967,11 @@ public class Translator {
 								" Failing rather than writing corrupted output."
 						);
 					}
-					return currentResult.withFailure(
-						"BODY", "Joined incremental translation lost a heading to the preceding block (" +
-							sourceHeadingCount + " in source vs " + translatedHeadingCount + " parsed)",
-						state.totalElapsedMillis
-					);
+					final String swallowed =
+						"Joined incremental translation lost a heading to the preceding block (" +
+							sourceHeadingCount + " in source vs " + translatedHeadingCount + " parsed)";
+					recordJoinedBodyFailure(job, newSourceDoc.getBodyContent(), joinedBody, swallowed);
+					return currentResult.withFailure("BODY", swallowed, state.totalElapsedMillis);
 				}
 			}
 
@@ -1033,7 +1137,8 @@ public class Translator {
 			final long startTime = System.currentTimeMillis();
 			try {
 				final SectionTranslationResult result = translateAndValidateSection(
-					systemPrompt, userPrompt, task.content(), expectedHeadingLevel
+					systemPrompt, userPrompt, task.content(), expectedHeadingLevel,
+					job, "section-" + taskIndex
 				);
 
 				final long elapsedMillis = System.currentTimeMillis() - startTime;
@@ -1059,6 +1164,8 @@ public class Translator {
 	 * @param userPrompt          the user prompt for the section
 	 * @param sourceContent       the source section content (for validation)
 	 * @param expectedHeadingLevel the expected heading level (0 for intro)
+	 * @param job                 the job this section belongs to, for failure artifacts
+	 * @param unit                identifies this section within the document, for failure artifacts
 	 * @return the translation result with accumulated tokens
 	 * @throws HeadingStructureMismatchException if retry also fails validation
 	 */
@@ -1067,7 +1174,9 @@ public class Translator {
 		@Nonnull String systemPrompt,
 		@Nonnull String userPrompt,
 		@Nonnull String sourceContent,
-		int expectedHeadingLevel
+		int expectedHeadingLevel,
+		@Nonnull TranslationJob job,
+		@Nonnull String unit
 	) throws HeadingStructureMismatchException {
 		// First attempt
 		final ChatResponse firstResponse = this.llmClient.chat(List.of(
@@ -1097,7 +1206,19 @@ public class Translator {
 			final String retryResult = retryResponse.aiMessage().text();
 
 			// Validate retry — if this throws, it propagates to the caller
-			validateSectionHeadingStructure(sourceContent, retryResult);
+			try {
+				validateSectionHeadingStructure(sourceContent, retryResult);
+			} catch (HeadingStructureMismatchException retryFailure) {
+				// both attempts are gone the moment this propagates; keep them while we still can
+				final Map<String, String> attachments = new LinkedHashMap<>();
+				attachments.put("source.md", sourceContent);
+				attachments.put("attempt-1.md", firstResult);
+				attachments.put("attempt-2.md", retryResult);
+				recordFailure(
+					job, unit, List.of(e.getMessage(), retryFailure.getMessage()), attachments
+				);
+				throw retryFailure;
+			}
 
 			return new SectionTranslationResult(
 				retryResult,

@@ -6,6 +6,7 @@ import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.output.TokenUsage;
 import io.evitadb.comenius.check.HeadingAnchorIndex;
+import io.evitadb.comenius.diagnostics.TranslationFailureArtifacts;
 import io.evitadb.comenius.llm.LlmClient;
 import io.evitadb.comenius.llm.PromptLoader;
 import io.evitadb.comenius.model.MarkdownDocument;
@@ -17,7 +18,9 @@ import io.evitadb.comenius.structure.TagVocabulary;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -771,6 +774,56 @@ public class TranslatorTest {
 		assertEquals(2, mockModel.getCallCount());
 	}
 
+	/**
+	 * The section gate is the one that rejected `fetching.md` in the real corpus, and the one whose
+	 * verdict was impossible to investigate because both attempts were discarded with it. It is
+	 * also the trickiest recording site - two attempts, two reasons - so it gets its own test.
+	 */
+	@Test
+	@DisplayName("shouldKeepBothSectionAttemptsWhenTheRetryAlsoFails")
+	void shouldKeepBothSectionAttemptsWhenTheRetryAlsoFails(@TempDir Path failureDir) throws Exception {
+		final Translator recordingTranslator = new Translator(
+			new LlmClient(mockModel), promptLoader, null, null, null,
+			new TranslationFailureArtifacts(failureDir)
+		);
+
+		mockModel.addResponse("## Extra\n\nContent.\n\n## Another\n\nMore.", 100, 50);
+		mockModel.addResponse("## Still Extra\n\nContent.\n\n## Still Another\n\nMore.", 100, 50);
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/documentation/en/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			"## Section A\n\nModified.",
+			"def456",
+			null,
+			null,
+			"## Section A\n\nOriginal.",
+			"## Abschnitt A\n\nUrspruenglich.",
+			"abc123",
+			1
+		);
+
+		final TranslationResult result = recordingTranslator.translate(job).toCompletableFuture().get();
+
+		assertFalse(result.success());
+		final Path unit = failureDir.resolve("de").resolve("documentation_en_doc.md").resolve("section-0");
+		assertTrue(Files.isDirectory(unit), "expected artifacts under " + unit);
+		assertTrue(Files.readString(unit.resolve("source.md")).contains("## Section A"));
+		assertTrue(
+			Files.readString(unit.resolve("attempt-1.md")).contains("## Another"),
+			"the first rejected attempt must be kept, not just the last"
+		);
+		assertTrue(
+			Files.readString(unit.resolve("attempt-2.md")).contains("## Still Another"),
+			"the retry must be kept too"
+		);
+		// both verdicts, not just the retry's - what changed between the attempts is the evidence
+		final String reason = Files.readString(unit.resolve("reason.txt"));
+		assertEquals(2, reason.lines().filter(line -> line.startsWith("- ")).count(), reason);
+		assertTrue(reason.contains("Section count mismatch"), reason);
+	}
+
 	@Test
 	@DisplayName("does not retry when section heading is correct on first attempt")
 	void shouldNotRetryWhenSectionHeadingIsCorrect() throws Exception {
@@ -873,6 +926,77 @@ public class TranslatorTest {
 			result.errorMessage() != null && result.errorMessage().contains("structural problem"),
 			"expected a structural-mismatch failure, got: " + result.errorMessage()
 		);
+	}
+
+	/**
+	 * The gate that refuses a bad translation is also the point at which the model's output is
+	 * thrown away - so the failure that costs money to produce is the one that leaves nothing
+	 * behind to explain it. This checks that the refusal keeps its evidence.
+	 */
+	@Test
+	@DisplayName("shouldKeepTheRejectedTranslationWhenAFailureDirIsConfigured")
+	void shouldKeepTheRejectedTranslationWhenAFailureDirIsConfigured(@TempDir Path failureDir) throws Exception {
+		final TagVocabulary vocabulary = TagVocabulary.of(Set.of("LS"), Set.of(), Set.of(), false);
+		final Translator vocabAwareTranslator = new Translator(
+			new LlmClient(mockModel), promptLoader, null, null, vocabulary,
+			new TranslationFailureArtifacts(failureDir)
+		);
+
+		mockModel.setResponse("# Titulek\n\nUvod.\n", 100, 50);
+
+		final TranslateNewJob job = new TranslateNewJob(
+			Path.of("/source/documentation/en/doc.md"),
+			Path.of("/target/cs/doc.md"),
+			Locale.forLanguageTag("cs"),
+			"# Title\n\nIntro.\n\n<LS to=\"e\">\n\nEnglish text.\n\n</LS>\n",
+			"abc123",
+			null,
+			null
+		);
+
+		final TranslationResult result = vocabAwareTranslator.translate(job).toCompletableFuture().get();
+
+		assertFalse(result.success());
+		final Path unit = failureDir.resolve("cs").resolve("documentation_en_doc.md").resolve("body");
+		assertTrue(Files.isDirectory(unit), "expected artifacts under " + unit);
+		assertTrue(
+			Files.readString(unit.resolve("response.md")).contains("Uvod."),
+			"the rejected response itself must be kept"
+		);
+		assertTrue(
+			Files.readString(unit.resolve("source.md")).contains("<LS to=\"e\">"),
+			"the source it was compared against must be kept"
+		);
+		assertTrue(
+			Files.readString(unit.resolve("reason.txt")).contains("block structure changed"),
+			"the reason must name the problem"
+		);
+	}
+
+	@Test
+	@DisplayName("shouldNotWriteAnythingWhenNoFailureDirIsConfigured")
+	void shouldNotWriteAnythingWhenNoFailureDirIsConfigured(@TempDir Path failureDir) throws Exception {
+		final TagVocabulary vocabulary = TagVocabulary.of(Set.of("LS"), Set.of(), Set.of(), false);
+		final Translator vocabAwareTranslator = new Translator(
+			new LlmClient(mockModel), promptLoader, null, null, vocabulary
+		);
+
+		mockModel.setResponse("# Titulek\n\nUvod.\n", 100, 50);
+
+		final TranslateNewJob job = new TranslateNewJob(
+			Path.of("/source/documentation/en/doc.md"),
+			Path.of("/target/cs/doc.md"),
+			Locale.forLanguageTag("cs"),
+			"# Title\n\nIntro.\n\n<LS to=\"e\">\n\nEnglish text.\n\n</LS>\n",
+			"abc123",
+			null,
+			null
+		);
+
+		assertFalse(vocabAwareTranslator.translate(job).toCompletableFuture().get().success());
+		try (var entries = Files.list(failureDir)) {
+			assertEquals(0, entries.count(), "recording must stay opt-in");
+		}
 	}
 
 	@Test
