@@ -18,6 +18,11 @@ while preserving formatting and structure.
 - **Heading Structure Validation**: Validates that LLM output preserves the source heading structure
 - **Cross-Document Anchor Correction**: Automatically fixes stale anchor references in other translated files after retranslation
 - **Fuzzy Anchor Matching**: Uses Levenshtein distance and token overlap for anchor correction in translated documents
+- **Structural Validation**: Compares tag structure, heading order, and blank lines between source and translation, using a tag vocabulary derived automatically from your corpus
+- **Untranslated-Content Autofix**: Detects text the model left untranslated and repairs it with a small, targeted follow-up request instead of a full retranslation
+- **Structure Repair**: A dedicated `fix-structure` action restores headings a Markdown parser stopped recognising because of a missing blank line
+- **Stale-Translation Detection**: Flags translations that were hand-updated ahead of their recorded commit instead of overwriting them
+- **Rejected-Translation Diagnostics**: Keeps a copy of any translation a structural gate rejects on disk for inspection, instead of discarding it
 
 ## Quick Start
 
@@ -28,7 +33,7 @@ Add the plugin to your `pom.xml`:
 <plugin>
     <groupId>one.edee.oss</groupId>
     <artifactId>comenius-maven-plugin</artifactId>
-    <version>1.0.1-SNAPSHOT</version>
+    <version>1.1.0</version>
     <configuration>
         <llmProvider>openai</llmProvider>
         <llmUrl>https://api.openai.com/v1</llmUrl>
@@ -55,14 +60,15 @@ Add the plugin to your `pom.xml`:
 
 ## Available Actions
 
-The plugin provides four actions via the `comenius.action` parameter:
+The plugin provides five actions via the `comenius.action` parameter:
 
-| Action        | Description                                           |
-|---------------|-------------------------------------------------------|
-| `show-config` | Displays current plugin configuration (default)       |
-| `check`       | Validates files - checks Git status and link validity |
-| `translate`   | Executes the translation workflow                     |
-| `fix-links`   | Corrects links in all translated files                |
+| Action          | Description                                                                         |
+|-----------------|--------------------------------------------------------------------------------------|
+| `show-config`   | Displays current plugin configuration (default)                                    |
+| `check`         | Validates files - checks Git status and link validity, for `sourceDir` and every configured target |
+| `translate`     | Executes the translation workflow                                                  |
+| `fix-links`     | Corrects links in all translated files                                             |
+| `fix-structure` | Restores headings a Markdown parser fails to recognise due to a missing blank line |
 
 ## Configuration Parameters
 
@@ -82,6 +88,7 @@ The plugin provides four actions via the `comenius.action` parameter:
 | `excludedFilePatterns` | `comenius.excludedFilePatterns` | -             | List of regex patterns to exclude directories/files |
 | `translatableFrontMatterFields` | `comenius.translatableFrontMatterFields` | - | Front matter fields to translate (e.g., title, perex) |
 | `customFrontMatter` | `comenius.customFrontMatter` | - | Custom key-value pairs to add to translated files' front matter |
+| `failureDir` | `comenius.failureDir` | `${project.build.directory}/comenius-failures` | Directory to keep translations rejected by a structural gate, for diagnosis; blank disables it |
 
 ## Recommended Workflow
 
@@ -110,6 +117,8 @@ The check action verifies:
 - All matched files are committed to Git (no uncommitted changes)
 - All internal links point to existing files
 - No broken references that would cause issues in translations
+- Each configured target directory, validated the same way against its own translated anchors (a
+  Czech document linking to a Czech anchor is checked in Czech)
 
 **Fix any reported errors before proceeding.**
 
@@ -373,6 +382,29 @@ commit: abc123def456
 Custom properties are applied after source and translated fields but before the system-managed `commit` field.
 The `commit` field cannot be overridden via custom front matter.
 
+## Repairing Heading Structure
+
+Under CommonMark, a heading that immediately follows a custom tag without a blank line in between is
+absorbed into that tag's HTML block and never recognised as a heading - invisible to tag-balance checks
+and to heading-structure validation alike, since the heading simply isn't in the parsed sequence. Section
+splitting and anchor mapping both depend on the heading being seen, so a swallowed heading silently breaks
+both. The `fix-structure` action finds and restores these, inserting a single blank line and touching
+nothing else.
+
+```bash
+mvn comenius:run -Dcomenius.action=fix-structure
+```
+
+Detection is authoritative, not a guess: a candidate is only kept once re-parsing the document confirms
+the parser now sees one more heading than before. Headings a blank line does not fix are reported as
+needing a human look.
+
+**Run this before `fix-links`** - anchors are mapped by heading position, and a swallowed heading shifts
+every anchor after it by one.
+
+Required: `targets`. Also respects `fileRegex`, `excludedFilePatterns`, and `dryRun` (previews repairs
+as `[DRY-RUN] would restore ...` without writing).
+
 ## Fixing Links in Translated Files
 
 The `fix-links` action corrects links in all translated files without performing new translations. This is useful for:
@@ -390,7 +422,11 @@ mvn comenius:run -Dcomenius.action=fix-links
 ### What Gets Corrected
 
 1. **Asset links** - Relative paths to images, PDFs, and other assets are recalculated from the target
-   directory to the source assets
+   directory to the source assets. Absolute links are never rewritten on principle - a model
+   sometimes localises a language segment it finds in one (e.g. `/documentation/user/en/...` becomes
+   `/documentation/user/cs/...`), so an absolute link is repaired only when it is broken (the file is
+   missing where it points) and the original resolves at the same relative path under `sourceDir`;
+   anything that already resolves is left untouched
 2. **Anchor links** - Internal anchors (e.g., `#section-title`) are corrected using a two-phase
    fuzzy matching algorithm (see below)
 3. **Front matter links** - Links in both translatable and non-translatable front matter fields are
@@ -404,16 +440,24 @@ The plugin uses a two-phase strategy:
 
 **Phase A - Target Language Matching** (compare anchor against the translated document's headings):
 1. Exact match (case-insensitive)
-2. Levenshtein distance (threshold: `max(2, anchor.length() / 3)`)
-3. Token overlap (split on hyphens, strict majority match required)
+2. Exact match against the *source* document's heading at the same position, position-mapped
+   directly into the translation (only when source and translated heading counts match). An
+   anchor that still names a source heading verbatim is not a similarity problem, and trying this
+   before any fuzzy step keeps it from being "corrected" onto a heading that merely looks similar
+3. Levenshtein distance (threshold: `max(2, anchor.length() / 3)`; a candidate whose token count
+   differs from the anchor's is skipped unless the two are equal once hyphens are stripped, since a
+   dropped word is otherwise cheap enough in edit distance to pass)
+4. Token overlap (split on hyphens; requires a strict majority of the anchor's own tokens to match,
+   and those matched tokens must also cover at least half of the candidate heading's own tokens)
 
 **Phase B - Source Language Matching** (if Phase A fails, match against the source document then
 position-map to translated):
 1. Find the anchor in the source document's heading index
 2. Map the matched position to the same position in the translated document's heading index
-3. Uses the same fuzzy matching strategies (exact, Levenshtein, token overlap) against the source
+3. Uses the same fuzzy matching strategies (exact, Levenshtein) against the source
 
-This two-phase approach handles both minor slug variations and full heading translations.
+This layered approach tries exact, same-document mappings before any fuzzy guess, then falls back to
+handle minor slug variations and full heading translations.
 
 ### Required Parameters
 
@@ -428,9 +472,9 @@ The following parameters are also respected by `fix-links`:
 - `excludedFilePatterns` - Patterns to exclude from processing
 - `translatableFrontMatterFields` - Determines which front matter fields receive full link correction
 - `parallelism` - Number of parallel threads for link correction
+- `dryRun` - Previews corrections without writing them (`[DRY-RUN] would correct N link(s) in ...`)
 
-**Note:** `dryRun` and `limit` have no effect on the `fix-links` action. It always processes all
-matching files and always writes corrections to disk.
+**Note:** `limit` has no effect on the `fix-links` action - it always processes all matching files.
 
 ### Example
 
@@ -533,6 +577,9 @@ After a translation run, the plugin reports:
 - **Successful**: Number of files successfully translated
 - **Failed**: Number of files that failed to translate
 - **Skipped**: Number of files already up-to-date
+- **Already current, only the commit field is stale**: Reported separately (see
+  [Detecting Hand-Updated Translations](#detecting-hand-updated-translations-ahead)) when a translation
+  was hand-updated ahead of its recorded commit
 - **Input tokens**: Total tokens sent to the LLM
 - **Output tokens**: Total tokens received from the LLM
 
@@ -659,6 +706,80 @@ the entire document instead of section-based updates.
 If no source sections have changed (all hashes match), the existing translation is preserved
 completely unchanged with no LLM calls for the body.
 
+### Detecting Hand-Updated Translations (`[AHEAD]`)
+
+Staleness is normally judged from the translation's `commit` front-matter field alone. If a
+translation is hand-edited in the same commit as the source change, though, its content is already
+current while the field still points at the old commit. Treating it as an ordinary incremental
+update is worse than a no-op: section mapping needs the translation to match the source *at the
+recorded commit*, but this one matches the *newer* source instead, so the mapping fails and the
+plugin [falls back to a full-body retranslation](#fallback-to-full-retranslation) - overwriting the
+hand-written text it was trying to preserve.
+
+Before queuing a job, the plugin compares heading-level sequences (the one part of a document's
+structure that survives translation) between the source at the recorded commit, the current source,
+and the existing translation. It skips the job, with a warning, only when both hold: the source's
+structure genuinely changed since the recorded commit, *and* the translation already carries the new
+structure. Ordinary edits that reword prose without moving a heading are still translated as before.
+
+```
+[AHEAD] docs/de/guide.md: the translation already has the structure of the source at abc123, but its
+commit field still says def456 - it was updated without that field being bumped. Skipping it: ...
+Set 'commit: abc123' in its front matter once you have confirmed it is current.
+```
+
+This is reported, not auto-fixed - update the translation's `commit` field yourself once you've
+confirmed it is current. The count is summarized separately from ordinary "Skipped" counts, in both
+dry-run and real translation runs.
+
+## Structural & Content Validation
+
+Before a translated body is accepted, the plugin checks more than heading levels - it compares the
+full set of tags, blank lines, and leaf text against the source.
+
+### Tag Vocabulary
+
+At the start of a `translate` run, the plugin scans every Markdown file under `sourceDir` and derives
+a **tag vocabulary**: the custom/component tags actually used in your corpus (e.g. `<Note>`,
+`<SourceClass>`), matched case-sensitively so a literal-HTML `<tr>` and a component `<Tr>` are never
+confused. This vocabulary powers the three checks below. If derivation fails, they are disabled for
+that run and a warning is logged, but translation continues.
+
+### Structural Comparison
+
+Compares a translated section against its source: block-level tags and headings are compared as an
+ordered sequence (their order *is* document structure), inline tags as a multiset (word order
+legitimately moves them within a translated sentence), and blank lines by count. A mismatch rejects
+the translation and triggers a retry or failure, the same as a heading-structure mismatch.
+
+### Tag-Case Repair
+
+If the model renders a component tag with the wrong case (e.g. closing `<Td>` as `</td>`), the
+casing is deterministically restored from the source - no model call involved - instead of the
+translation being rejected outright.
+
+### Untranslated-Content Autofix
+
+Leaf text the model left untranslated is detected and repaired with a small, single-phrase follow-up
+request instead of retranslating the whole section. If the model, asked to translate only that
+phrase in isolation, still returns it unchanged, that is accepted as its considered answer (a
+loanword or proper noun) rather than flagged again.
+
+## Diagnosing Rejected Translations
+
+When a structural gate rejects a translation - a tag mismatch, a swallowed heading, a section-count
+mismatch - the rejected output is kept on disk by default instead of discarded, so a failure can be
+diagnosed without paying for another LLM run just to reproduce it.
+
+Configure the location with `failureDir` (default: `target/comenius-failures`; blank disables it).
+Each rejection writes `reason.txt` plus the source and every attempted output under:
+
+```
+<failureDir>/<language>/<source-file>/<unit>/
+```
+
+Diagnostics never abort a run - if writing them fails, that failure is logged and swallowed.
+
 ## Two-Phase Translation Pipeline
 
 Each file is translated in two separate LLM calls:
@@ -732,6 +853,15 @@ Run the `check` action and fix reported issues:
 - Add custom instructions with terminology glossaries
 - Use more capable models (e.g., `gpt-4o` instead of `gpt-4o-mini`)
 - Provide context through instruction files
+- A rejected translation is kept under `failureDir` (default: `target/comenius-failures`) - inspect
+  `reason.txt` and the attempted outputs there instead of re-running to reproduce the failure
+
+### `[AHEAD]` warning during translate
+
+The translation was hand-updated in the same commit as the source change, so its `commit`
+front-matter field lags behind content that is already current. See
+[Detecting Hand-Updated Translations](#detecting-hand-updated-translations-ahead). Update the
+`commit` field once you've confirmed the translation is current; the plugin will not do this for you.
 
 ## License
 
