@@ -100,4 +100,19 @@ public final class MarkdownHeadings {
 		}
 		return headings;
 	}
+
+	/**
+	 * Returns the levels of the headings a reader sees, in document order.
+	 *
+	 * <p>This is the one part of a document's heading structure that survives translation.
+	 * Heading <em>text</em> does not - it is the thing being translated - so comparing a document
+	 * against its translation can only ever mean comparing their level sequences.</p>
+	 *
+	 * @param bodyContent the markdown body content (without front matter)
+	 * @return heading levels in document order
+	 */
+	@Nonnull
+	public static List<Integer> levels(@Nonnull String bodyContent) {
+		return scan(bodyContent).stream().map(VisualHeading::level).toList();
+	}
 }

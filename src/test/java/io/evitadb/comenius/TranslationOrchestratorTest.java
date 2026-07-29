@@ -191,6 +191,137 @@ public class TranslationOrchestratorTest {
 		assertTrue(testLog.hasError("untracked file") || testLog.hasError("uncommitted changes"));
 	}
 
+	/**
+	 * Reproduces the shape of a translation written in the same commit as the source change it
+	 * follows: the text is current, only the `commit` field was left behind. Retranslating it is
+	 * not a wasted no-op - section mapping needs the translation to match the source at the
+	 * recorded commit, this one matches the newer source, so the mapping is abandoned and the whole
+	 * body is retranslated over hand-written text.
+	 */
+	@Test
+	@DisplayName("shouldSkipTranslationThatAlreadyHasTheCurrentSourceStructure")
+	void shouldSkipTranslationThatAlreadyHasTheCurrentSourceStructure() throws Exception {
+		final Path sourceFile = sourceDir.resolve("ahead.md");
+		Files.writeString(sourceFile, "## Label\n\nLabels tag a query.\n");
+		runGit("add", "source/ahead.md");
+		runGit("commit", "-m", "Add source file");
+		final String oldCommit = gitService.getCurrentCommitHash(sourceFile).orElseThrow();
+
+		// the source grows a section
+		Files.writeString(sourceFile, "## Label\n\nLabels tag a query.\n\n### Cardinality\n\nBounded.\n");
+		runGit("add", "source/ahead.md");
+		runGit("commit", "-m", "Add a section");
+
+		// ...and so does the translation, by hand, without its commit field being bumped
+		Files.writeString(
+			targetDir.resolve("ahead.md"),
+			"---\ncommit: '" + oldCommit + "'\n---\n\n## Stitek\n\nStitky oznacuji dotaz.\n\n### Kardinalita\n\nOmezena.\n"
+		);
+
+		final Optional<TranslationJob> jobOpt = orchestrator.createJob(
+			sourceFile, Files.readString(sourceFile), targetDir, Locale.GERMAN, null, null
+		);
+
+		assertTrue(jobOpt.isEmpty());
+		assertEquals(1, orchestrator.getTranslationsAheadCount());
+		assertTrue(testLog.hasWarning("[AHEAD]"));
+		// the message must name the hash to write, or it is not actionable
+		final String currentCommit = gitService.getCurrentCommitHash(sourceFile).orElseThrow();
+		assertTrue(testLog.hasWarning(currentCommit));
+	}
+
+	@Test
+	@DisplayName("shouldNotCallAheadTranslationUpToDateInTheDryRunReport")
+	void shouldNotCallAheadTranslationUpToDateInTheDryRunReport() throws Exception {
+		final Path sourceFile = sourceDir.resolve("ahead-report.md");
+		Files.writeString(sourceFile, "## Label\n\nText.\n");
+		runGit("add", "source/ahead-report.md");
+		runGit("commit", "-m", "Add source file");
+		final String oldCommit = gitService.getCurrentCommitHash(sourceFile).orElseThrow();
+
+		Files.writeString(sourceFile, "## Label\n\nText.\n\n### More\n\nMore text.\n");
+		runGit("add", "source/ahead-report.md");
+		runGit("commit", "-m", "Add a section");
+
+		Files.writeString(
+			targetDir.resolve("ahead-report.md"),
+			"---\ncommit: '" + oldCommit + "'\n---\n\n## Stitek\n\nText.\n\n### Vic\n\nVic textu.\n"
+		);
+
+		orchestrator.createJob(
+			sourceFile, Files.readString(sourceFile), targetDir, Locale.GERMAN, null, null
+		);
+		orchestrator.reportUpToDate(sourceFile);
+
+		assertFalse(testLog.hasInfo("up to date"), "its commit field is precisely what is not");
+	}
+
+	/**
+	 * The mirror image of the case above, and the reason the check needs two conditions rather than
+	 * one: a translation that still matches the *old* source is ordinarily stale and must be
+	 * translated as before.
+	 */
+	@Test
+	@DisplayName("shouldStillUpdateTranslationThatMatchesTheOldSourceStructure")
+	void shouldStillUpdateTranslationThatMatchesTheOldSourceStructure() throws Exception {
+		final Path sourceFile = sourceDir.resolve("behind.md");
+		Files.writeString(sourceFile, "## Label\n\nLabels tag a query.\n");
+		runGit("add", "source/behind.md");
+		runGit("commit", "-m", "Add source file");
+		final String oldCommit = gitService.getCurrentCommitHash(sourceFile).orElseThrow();
+
+		Files.writeString(sourceFile, "## Label\n\nLabels tag a query.\n\n### Cardinality\n\nBounded.\n");
+		runGit("add", "source/behind.md");
+		runGit("commit", "-m", "Add a section");
+
+		// the translation was never updated - it still has the old single-section structure
+		Files.writeString(
+			targetDir.resolve("behind.md"),
+			"---\ncommit: '" + oldCommit + "'\n---\n\n## Stitek\n\nStitky oznacuji dotaz.\n"
+		);
+
+		final Optional<TranslationJob> jobOpt = orchestrator.createJob(
+			sourceFile, Files.readString(sourceFile), targetDir, Locale.GERMAN, null, null
+		);
+
+		assertTrue(jobOpt.isPresent());
+		assertInstanceOf(TranslateIncrementalJob.class, jobOpt.get());
+		assertEquals(0, orchestrator.getTranslationsAheadCount());
+	}
+
+	/**
+	 * The failure mode to guard hardest against: most real edits reword prose without moving a
+	 * heading, so a translation always matches its source's heading levels. If matching levels
+	 * alone were enough to skip, every prose-only update would be silently dropped.
+	 */
+	@Test
+	@DisplayName("shouldStillUpdateWhenOnlyProseChangedAndHeadingsMatch")
+	void shouldStillUpdateWhenOnlyProseChangedAndHeadingsMatch() throws Exception {
+		final Path sourceFile = sourceDir.resolve("prose.md");
+		Files.writeString(sourceFile, "## Label\n\nLabels tag a query.\n");
+		runGit("add", "source/prose.md");
+		runGit("commit", "-m", "Add source file");
+		final String oldCommit = gitService.getCurrentCommitHash(sourceFile).orElseThrow();
+
+		// same headings, different prose
+		Files.writeString(sourceFile, "## Label\n\nLabels tag a query for later identification.\n");
+		runGit("add", "source/prose.md");
+		runGit("commit", "-m", "Reword");
+
+		Files.writeString(
+			targetDir.resolve("prose.md"),
+			"---\ncommit: '" + oldCommit + "'\n---\n\n## Stitek\n\nStitky oznacuji dotaz.\n"
+		);
+
+		final Optional<TranslationJob> jobOpt = orchestrator.createJob(
+			sourceFile, Files.readString(sourceFile), targetDir, Locale.GERMAN, null, null
+		);
+
+		assertTrue(jobOpt.isPresent());
+		assertInstanceOf(TranslateIncrementalJob.class, jobOpt.get());
+		assertEquals(0, orchestrator.getTranslationsAheadCount());
+	}
+
 	@Test
 	@DisplayName("shouldCalculateCorrectCommitCount")
 	void shouldCalculateCorrectCommitCount() throws Exception {
@@ -375,9 +506,10 @@ public class TranslationOrchestratorTest {
 	@Test
 	@DisplayName("shouldReportUpToDate")
 	void shouldReportUpToDate() {
-		orchestrator.reportUpToDate(Path.of("up-to-date.md"));
+		orchestrator.reportUpToDate(sourceDir.resolve("up-to-date.md"));
 		assertTrue(testLog.hasInfo("[SKIP]"));
 		assertTrue(testLog.hasInfo("up to date"));
+		assertTrue(testLog.hasInfo("up-to-date.md"));
 	}
 
 	private static void deleteRecursively(Path path) throws IOException {

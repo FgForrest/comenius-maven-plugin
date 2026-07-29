@@ -6,6 +6,7 @@ import io.evitadb.comenius.model.MarkdownDocument;
 import io.evitadb.comenius.model.TranslateIncrementalJob;
 import io.evitadb.comenius.model.TranslateNewJob;
 import io.evitadb.comenius.model.TranslationJob;
+import io.evitadb.comenius.structure.MarkdownHeadings;
 import org.apache.maven.plugin.logging.Log;
 
 import javax.annotation.Nonnull;
@@ -18,6 +19,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Orchestrates the translation workflow: analyzing files, validating git state,
@@ -31,6 +34,12 @@ public final class TranslationOrchestrator {
 	private final Path sourceDir;
 	@Nonnull
 	private final Log log;
+	/**
+	 * Documents whose translation already carries the current source's structure while their
+	 * {@code commit} field lags behind. Written from the traversal, which may run in parallel.
+	 */
+	@Nonnull
+	private final Set<Path> translationsAhead = ConcurrentHashMap.newKeySet();
 
 	/**
 	 * Creates an orchestrator with the required services.
@@ -134,6 +143,23 @@ public final class TranslationOrchestrator {
 			));
 		}
 
+		if (isTranslationAhead(commitInfo.originalSource(), sourceContent, existingTranslation)) {
+			this.translationsAhead.add(relativePath);
+			this.log.warn(String.format(
+				"[AHEAD] %s: the translation already has the structure of the source at %s, but its" +
+					" commit field still says %s - it was updated without that field being bumped." +
+					" Skipping it: the incremental path cannot map the new source onto a translation" +
+					" that no longer matches the old one, so it would fall back to translating the" +
+					" whole body from scratch and overwrite that work. Set 'commit: %s' in its front" +
+					" matter once you have confirmed it is current.",
+				relativePath,
+				commitInfo.currentCommit(),
+				commitInfo.translatedCommit(),
+				commitInfo.currentCommit()
+			));
+			return Optional.empty();
+		}
+
 		return Optional.of(new TranslateIncrementalJob(
 			sourceFile, targetFile, locale, sourceContent, commitInfo.currentCommit(), instructions,
 			translatableFrontMatterFields,
@@ -142,6 +168,58 @@ public final class TranslationOrchestrator {
 			commitInfo.translatedCommit(),
 			commitInfo.commitCount()
 		));
+	}
+
+	/**
+	 * Decides whether an existing translation has already been brought up to the current source
+	 * while its {@code commit} field was left behind.
+	 *
+	 * <p>Staleness is normally judged from that field alone, and for a file nobody touches by hand
+	 * that is exact. It is not exact for a file whose translation is written in the same commit as
+	 * the source change - the translation is current, the field is not, and the file is queued for
+	 * a retranslation with nothing to translate. Worse, the retranslation is not a no-op: section
+	 * mapping needs the translation to match the source <em>at the recorded commit</em>, this one
+	 * matches the newer source instead, so the mapping is abandoned and the whole body is
+	 * retranslated over hand-written text.</p>
+	 *
+	 * <p>The signal is the heading-level sequence, the one part of document structure that survives
+	 * translation. Two conditions must hold together: the source's structure really did change
+	 * since the recorded commit, and the translation already carries the <em>new</em> structure.
+	 * A translation that merely still matches the old structure is ordinary staleness and is
+	 * translated as before.</p>
+	 *
+	 * <p>This deliberately proves less than "the translation is up to date" - prose can change
+	 * without moving a heading, and no structural test can see that. It proves that a full-body
+	 * retranslation, which is the only thing that would otherwise happen, would destroy more than
+	 * it repairs. Hence: report, and let a human decide.</p>
+	 *
+	 * @param originalSource      the source content at the commit the translation records
+	 * @param currentSource       the current source content
+	 * @param existingTranslation the existing translation content
+	 * @return true when the translation is ahead of the commit field it carries
+	 */
+	private static boolean isTranslationAhead(
+		@Nonnull String originalSource,
+		@Nonnull String currentSource,
+		@Nonnull String existingTranslation
+	) {
+		final List<Integer> originalLevels = headingLevels(originalSource);
+		final List<Integer> currentLevels = headingLevels(currentSource);
+		if (originalLevels.equals(currentLevels)) {
+			return false;
+		}
+		return currentLevels.equals(headingLevels(existingTranslation));
+	}
+
+	/**
+	 * Extracts the heading-level sequence of a document's body, ignoring its front matter.
+	 *
+	 * @param document the raw document content, front matter included
+	 * @return heading levels in document order
+	 */
+	@Nonnull
+	private static List<Integer> headingLevels(@Nonnull String document) {
+		return MarkdownHeadings.levels(new MarkdownDocument(document).getBodyContent());
 	}
 
 	/**
@@ -170,9 +248,31 @@ public final class TranslationOrchestrator {
 	/**
 	 * Reports that a file was skipped because it's up-to-date.
 	 *
-	 * @param relativePath the relative path for display
+	 * <p>Takes the source file rather than a caller-computed relative path, so that the path this
+	 * prints and the path {@link #createJob} recorded are relativized against the same root by the
+	 * same code. Keying the suppression below on a path the caller happened to derive the same way
+	 * would work only for as long as it kept doing so.</p>
+	 *
+	 * @param sourceFile the source markdown file that was skipped
 	 */
-	public void reportUpToDate(@Nonnull Path relativePath) {
+	public void reportUpToDate(@Nonnull Path sourceFile) {
+		Objects.requireNonNull(sourceFile, "sourceFile must not be null");
+		final Path relativePath = this.sourceDir.relativize(sourceFile.toAbsolutePath().normalize());
+		if (this.translationsAhead.contains(relativePath)) {
+			// createJob has already reported this one in full; "up to date" would misdescribe it,
+			// because its commit field is precisely what is not
+			return;
+		}
 		this.log.info("[SKIP] " + relativePath + " (up to date)");
+	}
+
+	/**
+	 * Returns how many documents were skipped because their translation already carries the current
+	 * source's structure while their {@code commit} field lags behind.
+	 *
+	 * @return the number of such documents seen so far
+	 */
+	public int getTranslationsAheadCount() {
+		return this.translationsAhead.size();
 	}
 }

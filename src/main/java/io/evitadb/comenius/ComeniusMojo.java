@@ -146,6 +146,24 @@ public class ComeniusMojo extends AbstractMojo {
 		}
 	}
 
+	/**
+	 * Reports how many documents were skipped because their translation already carries the current
+	 * source's structure while their {@code commit} field lags behind. Silent when there are none -
+	 * this is an exceptional condition, not a routine tally.
+	 *
+	 * @param log          the Maven log to report to
+	 * @param orchestrator the orchestrator that examined the documents
+	 */
+	private static void reportTranslationsAhead(
+		@Nonnull final Log log, @Nonnull final TranslationOrchestrator orchestrator
+	) {
+		final int ahead = orchestrator.getTranslationsAheadCount();
+		if (ahead > 0) {
+			log.warn("Already current, only the commit field is stale: " + ahead +
+				" (see the [AHEAD] lines above)");
+		}
+	}
+
 	private void showConfig(@Nonnull final Log log) {
 		log.info("Comenius Plugin Configuration:");
 		log.info(" - llmProvider: " + this.llmProvider);
@@ -389,7 +407,7 @@ public class ComeniusMojo extends AbstractMojo {
 							// File was skipped (up-to-date or error)
 							skippedCount.incrementAndGet();
 							if (this.dryRun) {
-								orchestrator.reportUpToDate(relativePath);
+								orchestrator.reportUpToDate(file);
 							}
 						}
 					} catch (IOException e) {
@@ -408,6 +426,7 @@ public class ComeniusMojo extends AbstractMojo {
 					log.info("New files: " + newCount.get());
 					log.info("Files to update: " + updateCount.get());
 					log.info("Skipped (up-to-date): " + skippedCount.get());
+					reportTranslationsAhead(log, orchestrator);
 					if (errorCount.get() > 0) {
 						log.info("Errors: " + errorCount.get());
 					}
@@ -420,6 +439,7 @@ public class ComeniusMojo extends AbstractMojo {
 					log.info("Successful: " + summary.successCount());
 					log.info("Failed: " + summary.failedCount());
 					log.info("Skipped: " + skippedCount.get());
+					reportTranslationsAhead(log, orchestrator);
 					log.info("Input tokens: " + summary.inputTokens());
 					log.info("Output tokens: " + summary.outputTokens());
 
