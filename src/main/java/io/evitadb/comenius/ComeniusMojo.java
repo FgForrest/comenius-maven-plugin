@@ -4,11 +4,13 @@ import dev.langchain4j.model.chat.ChatModel;
 import io.evitadb.comenius.check.AnchorChangeSet;
 import io.evitadb.comenius.check.CheckResult;
 import io.evitadb.comenius.check.ContentChecker;
+import io.evitadb.comenius.check.CrossLanguageChecker;
 import io.evitadb.comenius.check.ExternalLinkCorrector;
 import io.evitadb.comenius.check.GitError;
 import io.evitadb.comenius.check.LinkCorrector;
 import io.evitadb.comenius.check.LinkCorrectionResult;
 import io.evitadb.comenius.check.LinkError;
+import io.evitadb.comenius.check.StructuralError;
 import io.evitadb.comenius.check.StructureRepairer;
 import io.evitadb.comenius.diagnostics.TranslationFailureArtifacts;
 import io.evitadb.comenius.git.GitService;
@@ -537,6 +539,16 @@ public class ComeniusMojo extends AbstractMojo {
 			log.info("Checked " + fileCount.get() + " files");
 			reportCheckResult(log, root, result);
 
+			// Cross-language structural checks (tag scope, content-loss detection) compare each
+			// translated file against its English source, so they need the same corpus-derived
+			// vocabulary the translate action uses. A failed derivation disables them for this run,
+			// same fallback as everywhere else that depends on the vocabulary.
+			final TagVocabulary vocabulary = deriveVocabulary(root, log);
+			if (vocabulary == null) {
+				log.warn("Cross-language structural checks (tag scope, content loss) are disabled" +
+					" for this run because tag vocabulary derivation failed.");
+			}
+
 			// Translated trees are documents in their own right - their links can rot exactly
 			// like the source ones, and until they are checked too a green run says nothing
 			// about them. Each target is checked against itself, so a Czech document linking to
@@ -556,14 +568,23 @@ public class ComeniusMojo extends AbstractMojo {
 					}
 
 					final ContentChecker targetChecker = new ContentChecker(gitService, targetDir, gitRoot);
+					final CrossLanguageChecker crossLanguageChecker = vocabulary == null ? null :
+						new CrossLanguageChecker(root, targetDir, gitService, vocabulary);
 					final AtomicInteger targetFileCount = new AtomicInteger(0);
 					final Visitor targetVisitor = (file, content, instructions) -> {
 						targetChecker.checkFile(file, content);
+						if (crossLanguageChecker != null) {
+							crossLanguageChecker.checkFile(file, content);
+						}
 						targetFileCount.incrementAndGet();
 					};
 					new Traverser(targetDir, pattern, exclusionPatterns, targetVisitor).traverse();
 
-					final CheckResult targetResult = targetChecker.getResult();
+					final CheckResult targetResult = new CheckResult(
+						targetChecker.getResult().gitErrors(),
+						targetChecker.getResult().linkErrors(),
+						crossLanguageChecker == null ? List.of() : crossLanguageChecker.getErrors()
+					);
 					log.info("=== Checked " + targetFileCount.get() + " files for: " +
 						locale.getDisplayName() + " (" + locale.toLanguageTag() + ") in " + targetDir + " ===");
 					reportCheckResult(log, targetDir, targetResult);
@@ -697,6 +718,13 @@ public class ComeniusMojo extends AbstractMojo {
 			log.error("Link validation errors: " + result.linkErrors().size());
 			for (final LinkError error : result.linkErrors()) {
 				log.error("  " + root.relativize(error.sourceFile()) + ": " + error.linkDestination() +
+					" (" + error.type() + ")");
+			}
+		}
+		if (!result.structuralErrors().isEmpty()) {
+			log.error("Cross-language structural errors: " + result.structuralErrors().size());
+			for (final StructuralError error : result.structuralErrors()) {
+				log.error("  " + root.relativize(error.file()) + ": " + error.message() +
 					" (" + error.type() + ")");
 			}
 		}

@@ -117,4 +117,27 @@ public class CheckResultTest {
 		// Result should still have the error
 		assertEquals(1, result.gitErrors().size());
 	}
+
+	@Test
+	@DisplayName("the two-argument constructor defaults to no structural errors")
+	public void shouldDefaultToNoStructuralErrorsViaShortConstructor() {
+		final CheckResult result = new CheckResult(List.of(), List.of());
+
+		assertTrue(result.structuralErrors().isEmpty());
+	}
+
+	@Test
+	@DisplayName("returns failure and counts correctly when structural errors exist")
+	public void shouldReturnFailureWhenStructuralErrorsExist() {
+		final StructuralError error = new StructuralError(
+			Path.of("/test/doc.md"),
+			StructuralError.StructuralErrorType.TAG_SCOPE_MISMATCH,
+			"heading 1 sits in a different language scope than its source"
+		);
+		final CheckResult result = new CheckResult(List.of(), List.of(), List.of(error));
+
+		assertFalse(result.isSuccess());
+		assertEquals(1, result.errorCount());
+		assertEquals(1, result.structuralErrors().size());
+	}
 }
