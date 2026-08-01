@@ -707,6 +707,63 @@ public class TranslatorTest {
 		assertEquals(2, mockModel.getCallCount());
 	}
 
+	/**
+	 * A tag that wraps more than one heading forces the vocabulary-aware splitter to merge those
+	 * headings into a single section (it must not tear the tag in half). That merge is the right
+	 * call for *partitioning* content, but the validation gate must not re-split both sides with
+	 * that same merge to *compare* them: a translation that silently drops one of the merged
+	 * headings still re-merges into "1 section" on both sides, since the tag itself stays balanced
+	 * around whatever content survived. This mirrors the 2026-08-01 incident where a 64KB
+	 * multi-heading section came back truncated and the vocabulary-aware comparison saw no
+	 * mismatch at all - only the plain, heading-counting comparison catches it.
+	 */
+	@Test
+	@DisplayName("catches a dropped heading inside a tag-merged section that vocabulary-aware counting would hide")
+	void shouldCatchDroppedHeadingHiddenByVocabularyMerge() throws Exception {
+		final TagVocabulary wrapVocabulary = TagVocabulary.of(Set.of("Wrap"), Set.of(), Set.of(), false);
+		final Translator vocabularyAwareTranslator = new Translator(
+			new LlmClient(mockModel), promptLoader, null, null, wrapVocabulary
+		);
+
+		// the model drops "Section B" entirely but still closes </Wrap> correctly, so the
+		// response stays internally tag-balanced despite the missing heading
+		mockModel.setResponse(
+			"<Wrap>\n\n## Abschnitt A\n\nGeaendert A.\n\n</Wrap>", 100, 50
+		);
+
+		final String oldSource =
+			"<Wrap>\n\n## Section A\n\nOriginal A.\n\n## Section B\n\nOriginal B.\n\n</Wrap>";
+		final String newSource =
+			"<Wrap>\n\n## Section A\n\nModified A.\n\n## Section B\n\nOriginal B.\n\n</Wrap>";
+		final String existingTranslation =
+			"<Wrap>\n\n## Abschnitt A\n\nUrspruenglich A.\n\n## Abschnitt B\n\nUrspruenglich B.\n\n</Wrap>";
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/de/doc.md"),
+			Locale.GERMAN,
+			newSource,
+			"def456",
+			null,
+			null,
+			oldSource,
+			existingTranslation,
+			"abc123",
+			1
+		);
+
+		final CompletionStage<TranslationResult> stage = vocabularyAwareTranslator.translate(job);
+		final TranslationResult result = stage.toCompletableFuture().get();
+
+		assertFalse(result.success(), "Should fail: 'Section B' was silently dropped");
+		assertTrue(
+			result.errorMessage().contains("Section count mismatch"),
+			"Error should report the real heading-count mismatch, got: " + result.errorMessage()
+		);
+		// Both first attempt and retry get the same (still-truncated) response
+		assertEquals(2, mockModel.getCallCount());
+	}
+
 	@Test
 	@DisplayName("retries once when section heading level is wrong, then succeeds")
 	void shouldRetryOnceWhenSectionHeadingLevelIsWrong() throws Exception {

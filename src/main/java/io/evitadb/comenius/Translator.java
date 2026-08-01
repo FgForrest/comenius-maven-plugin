@@ -1250,6 +1250,14 @@ public class Translator {
 	 * A section should produce the same number of sub-sections with matching heading levels
 	 * when split by {@link DocumentSectionSplitter}.
 	 *
+	 * Deliberately uses the plain, non-merging {@link DocumentSectionSplitter#split(String)}
+	 * rather than the vocabulary-aware overload. The vocabulary-aware merge is right for
+	 * *partitioning* content (it must not tear a tag in half), but wrong for *comparing* it: the
+	 * merge is content-dependent, so a section whose translation lost content re-merges
+	 * differently than its source, and re-splitting both sides with the same lossy merge can hide
+	 * exactly the mismatch this check exists to catch - see the 2026-08-01 incident where a 64KB
+	 * merged section came back truncated and both sides still collapsed to the same section count.
+	 *
 	 * @param sourceContent     the original source section content
 	 * @param translatedContent the LLM-translated section content
 	 * @throws HeadingStructureMismatchException if the heading structure does not match
@@ -1258,8 +1266,8 @@ public class Translator {
 		@Nonnull String sourceContent,
 		@Nonnull String translatedContent
 	) throws HeadingStructureMismatchException {
-		final List<DocumentSection> sourceSections = DocumentSectionSplitter.split(sourceContent, this.vocabulary);
-		final List<DocumentSection> translatedSections = DocumentSectionSplitter.split(translatedContent, this.vocabulary);
+		final List<DocumentSection> sourceSections = DocumentSectionSplitter.split(sourceContent);
+		final List<DocumentSection> translatedSections = DocumentSectionSplitter.split(translatedContent);
 
 		DocumentSectionSplitter.validateHeadingStructure(sourceSections, translatedSections);
 	}
@@ -1318,6 +1326,10 @@ public class Translator {
 	/**
 	 * Validates that the translated body has the same heading structure as the source.
 	 *
+	 * Deliberately uses the plain, non-merging {@link DocumentSectionSplitter#split(String)}
+	 * rather than the vocabulary-aware overload - see {@link #validateSectionHeadingStructure}
+	 * for why the vocabulary-aware merge must not be used for comparison.
+	 *
 	 * @param job            the translation job
 	 * @param translatedBody the translated body content
 	 * @throws HeadingStructureMismatchException if structures don't match
@@ -1329,8 +1341,8 @@ public class Translator {
 		final MarkdownDocument sourceDoc = new MarkdownDocument(job.getSourceContent());
 		final String sourceBody = sourceDoc.getBodyContent();
 
-		final List<DocumentSection> sourceSections = DocumentSectionSplitter.split(sourceBody, this.vocabulary);
-		final List<DocumentSection> translatedSections = DocumentSectionSplitter.split(translatedBody, this.vocabulary);
+		final List<DocumentSection> sourceSections = DocumentSectionSplitter.split(sourceBody);
+		final List<DocumentSection> translatedSections = DocumentSectionSplitter.split(translatedBody);
 
 		DocumentSectionSplitter.validateHeadingStructure(sourceSections, translatedSections);
 	}
