@@ -9,6 +9,8 @@ import io.evitadb.comenius.check.HeadingAnchorIndex;
 import io.evitadb.comenius.diagnostics.TranslationFailureArtifacts;
 import io.evitadb.comenius.llm.LlmClient;
 import io.evitadb.comenius.llm.PromptLoader;
+import io.evitadb.comenius.model.DocumentChunk;
+import io.evitadb.comenius.model.DocumentSplitter;
 import io.evitadb.comenius.model.MarkdownDocument;
 import io.evitadb.comenius.model.TranslateIncrementalJob;
 import io.evitadb.comenius.model.TranslateNewJob;
@@ -1195,6 +1197,163 @@ public class TranslatorTest {
 		assertTrue(result.success(), "expected success, got: " + result.errorMessage());
 		assertTrue(result.translatedContent().contains("</LS>"), "closing tag case should be repaired");
 		assertFalse(result.translatedContent().contains("</ls>"));
+	}
+
+	/**
+	 * Reproduces the 2026-07-28 write-data.md incident at the smallest scale that reaches the
+	 * chunked new-job path: {@link io.evitadb.comenius.model.DocumentSplitter} is heading-based, so
+	 * a headingless block (an {@code <LS>} span with no heading inside it, exactly like the real
+	 * "warm-up mode termination" section) can be silently dropped by the model within a single
+	 * chunk without changing that chunk's heading count. Before this fix, only the *joined* body's
+	 * heading count was checked - invisible to a heading-free loss. Uses a tiny target size (the
+	 * production default, 32kB, would never split a test-sized fixture - see the constructor this
+	 * test uses, added for the same testability reason as {@code UnitPacker.Settings}).
+	 */
+	@Test
+	@DisplayName("fails a chunked new-job translation when a chunk silently drops a headingless block")
+	void shouldFailChunkedNewJobWhenAChunkDropsAHeadinglessBlock() throws Exception {
+		final TagVocabulary vocabulary = TagVocabulary.of(Set.of("LS"), Set.of(), Set.of(), false);
+		final Translator chunkedTranslator = new Translator(
+			new LlmClient(mockModel), promptLoader, null, null, vocabulary, null,
+			UnitPacker.Settings.defaults(), new DocumentSplitter(30)
+		);
+
+		final String source =
+			"# Chapter One\n\n" +
+			"Intro text for chapter one, padded so this document comfortably exceeds the tiny" +
+			" target chunk size used to force splitting for this test.\n\n" +
+			"<LS to=\"e\">\n\nEnglish-only content that must survive translation.\n\n</LS>\n\n" +
+			"# Chapter Two\n\n" +
+			"Content for chapter two, also padded so the split lands cleanly at this heading.\n";
+
+		final TranslateNewJob job = new TranslateNewJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/cs/doc.md"),
+			Locale.forLanguageTag("cs"),
+			source,
+			"abc123",
+			null,
+			null
+		);
+
+		// chunk 1 (Chapter One): the model drops the whole <LS> block, keeping the heading intact -
+		// invisible to heading-only validation, exactly the defect this gate exists to catch
+		mockModel.addResponse("# Kapitola jedna\n\nUvodni text ke kapitole jedna.\n", 100, 50);
+		// chunk 2 (Chapter Two): would be a normal translation, never reached
+		mockModel.addResponse("# Kapitola dva\n\nObsah kapitoly dva.\n", 100, 50);
+
+		final TranslationResult result = chunkedTranslator.translate(job).toCompletableFuture().get();
+
+		assertFalse(result.success(), "the dropped <LS> block must fail the translation");
+		assertTrue(
+			result.errorMessage() != null && result.errorMessage().contains("structural problem"),
+			"expected a structural-mismatch failure, got: " + result.errorMessage()
+		);
+		assertEquals(1, mockModel.getCallCount(), "chunk 2 must never be attempted once chunk 1 fails");
+	}
+
+	/**
+	 * {@link io.evitadb.comenius.model.DocumentSplitter} picks chunk boundaries purely by heading
+	 * position, with no awareness of tag nesting - so a tag that spans more than one heading is
+	 * torn across chunks in the source itself. When every chunk's response faithfully preserves its
+	 * own half of the tear, the joined body must reassemble into valid, balanced markup - this is
+	 * the non-regression counterpart to the next test.
+	 */
+	@Test
+	@DisplayName("joins a tag legitimately torn across chunks back into balanced markup")
+	void shouldJoinChunksWithATagTornAcrossTheBoundaryIntoBalancedMarkup() throws Exception {
+		final TagVocabulary vocabulary = TagVocabulary.of(Set.of("LS"), Set.of(), Set.of(), false);
+		final DocumentSplitter splitter = new DocumentSplitter(30);
+		final Translator chunkedTranslator = new Translator(
+			new LlmClient(mockModel), promptLoader, null, null, vocabulary, null,
+			UnitPacker.Settings.defaults(), splitter
+		);
+
+		final String source =
+			"<LS to=\"e\">\n\n" +
+			"# Chapter One\n\n" +
+			"English content for chapter one, padded well beyond the tiny target chunk size so" +
+			" the splitter is forced to break this document into pieces for the test.\n\n" +
+			"# Chapter Two\n\n" +
+			"More English content for chapter two, also padded, before the language switch" +
+			" finally closes below.\n\n</LS>\n";
+
+		final List<DocumentChunk> chunks = splitter.split(source);
+		assertEquals(2, chunks.size(), "fixture must force exactly two chunks for this test to be meaningful");
+		assertTrue(chunks.get(0).content().contains("<LS") && !chunks.get(0).content().contains("</LS>"),
+			"chunk 1 must hold the dangling open half of the torn tag");
+		assertTrue(chunks.get(1).content().contains("</LS>") && !chunks.get(1).content().contains("<LS to"),
+			"chunk 2 must hold the dangling close half of the torn tag");
+
+		final TranslateNewJob job = new TranslateNewJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/cs/doc.md"),
+			Locale.forLanguageTag("cs"),
+			source,
+			"abc123",
+			null,
+			null
+		);
+
+		// each response preserves its own chunk's tag structure exactly, only the prose changes
+		mockModel.addResponse(
+			"<LS to=\"e\">\n\n# Kapitola jedna\n\nCesky text pro kapitolu jedna.\n\n", 100, 50
+		);
+		mockModel.addResponse("# Kapitola dva\n\nDalsi cesky text pro kapitolu dva.\n\n</LS>\n", 100, 50);
+
+		final TranslationResult result = chunkedTranslator.translate(job).toCompletableFuture().get();
+
+		assertTrue(result.success(), "a faithfully-preserved torn tag must still join cleanly, got: " + result.errorMessage());
+		assertEquals(1, result.translatedContent().split("<LS", -1).length - 1);
+		assertEquals(1, result.translatedContent().split("</LS>", -1).length - 1);
+	}
+
+	/**
+	 * The failure counterpart to the previous test: chunk 2's response drops its half of the same
+	 * torn tag. Whether this is caught by the per-chunk comparison or by the joined-body
+	 * {@code TagBalance} safety net, the outcome that matters is that the translation is rejected
+	 * rather than silently written out with a dangling, never-closed {@code <LS>}.
+	 */
+	@Test
+	@DisplayName("fails rather than writing a chunked translation that leaves a torn tag unclosed")
+	void shouldFailChunkedNewJobWhenATornTagIsNotReclosed() throws Exception {
+		final TagVocabulary vocabulary = TagVocabulary.of(Set.of("LS"), Set.of(), Set.of(), false);
+		final DocumentSplitter splitter = new DocumentSplitter(30);
+		final Translator chunkedTranslator = new Translator(
+			new LlmClient(mockModel), promptLoader, null, null, vocabulary, null,
+			UnitPacker.Settings.defaults(), splitter
+		);
+
+		final String source =
+			"<LS to=\"e\">\n\n" +
+			"# Chapter One\n\n" +
+			"English content for chapter one, padded well beyond the tiny target chunk size so" +
+			" the splitter is forced to break this document into pieces for the test.\n\n" +
+			"# Chapter Two\n\n" +
+			"More English content for chapter two, also padded, before the language switch" +
+			" finally closes below.\n\n</LS>\n";
+
+		final TranslateNewJob job = new TranslateNewJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/cs/doc.md"),
+			Locale.forLanguageTag("cs"),
+			source,
+			"abc123",
+			null,
+			null
+		);
+
+		mockModel.addResponse(
+			"<LS to=\"e\">\n\n# Kapitola jedna\n\nCesky text pro kapitolu jedna.\n\n", 100, 50
+		);
+		// chunk 2 translates the heading faithfully but drops the closing </LS>, as if the model
+		// treated the dangling tag as an artifact rather than the other half of a legitimate
+		// language-switch span
+		mockModel.addResponse("# Kapitola dva\n\nDalsi cesky text pro kapitolu dva.\n\n", 100, 50);
+
+		final TranslationResult result = chunkedTranslator.translate(job).toCompletableFuture().get();
+
+		assertFalse(result.success(), "a translation with a never-closed <LS> must not be written out");
 	}
 
 	/**

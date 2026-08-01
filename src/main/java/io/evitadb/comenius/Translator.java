@@ -194,11 +194,46 @@ public class Translator {
 		@Nullable TranslationFailureArtifacts failureArtifacts,
 		@Nonnull UnitPacker.Settings unitPackerSettings
 	) {
+		this(
+			llmClient, promptLoader, executor, log, vocabulary, failureArtifacts, unitPackerSettings,
+			new DocumentSplitter()
+		);
+	}
+
+	/**
+	 * Create a Translator with every collaborator explicit, including the target chunk size
+	 * {@link #translateChunkedBody} uses to split a large new-job document.
+	 *
+	 * The splitter exists as a constructor parameter for the same reason
+	 * {@code unitPackerSettings} does: {@link DocumentSplitter#DEFAULT_TARGET_SIZE} is 32kB, so a
+	 * document small enough to be a reasonable test fixture never actually chunks, which makes the
+	 * chunked path's own structural checks unobservable in a unit test. Production code should keep
+	 * using one of the shorter constructors, which all default to {@link DocumentSplitter#DocumentSplitter()}.
+	 *
+	 * @param llmClient          non-null LLM client to use
+	 * @param promptLoader       non-null prompt loader for loading templates
+	 * @param executor           executor for async operations; may be null to use common pool
+	 * @param log                Maven log for diagnostic messages; may be null
+	 * @param vocabulary         corpus-derived tag vocabulary; may be null to skip the new checks
+	 * @param failureArtifacts   writer for rejected translations; may be null to discard them
+	 * @param unitPackerSettings the size policy for packing a document into translation units
+	 * @param documentSplitter   the size policy for splitting a large new-job document into chunks
+	 */
+	public Translator(
+		@Nonnull LlmClient llmClient,
+		@Nonnull PromptLoader promptLoader,
+		@Nullable Executor executor,
+		@Nullable Log log,
+		@Nullable TagVocabulary vocabulary,
+		@Nullable TranslationFailureArtifacts failureArtifacts,
+		@Nonnull UnitPacker.Settings unitPackerSettings,
+		@Nonnull DocumentSplitter documentSplitter
+	) {
 		this.llmClient = Objects.requireNonNull(llmClient, "llmClient must not be null");
 		this.promptLoader = Objects.requireNonNull(promptLoader, "promptLoader must not be null");
 		this.executor = executor;
 		this.log = log;
-		this.documentSplitter = new DocumentSplitter();
+		this.documentSplitter = Objects.requireNonNull(documentSplitter, "documentSplitter must not be null");
 		this.vocabulary = vocabulary;
 		this.failureArtifacts = failureArtifacts;
 		this.unitPackerSettings = Objects.requireNonNull(unitPackerSettings, "unitPackerSettings must not be null");
@@ -730,6 +765,33 @@ public class Translator {
 				return currentResult.withFailure("BODY", e.getMessage(), state.totalElapsedMillis);
 			}
 
+			// Safety net: DocumentSplitter picks chunk boundaries without any awareness of tag
+			// nesting, so a tag can legitimately straddle a chunk boundary in the source. Per-chunk
+			// applyStructuralChecks compares each chunk to its own source slice and cannot see a
+			// tag left unclosed across chunks that a naive join then reproduces as broken markup -
+			// see the same reasoning in translateSectionBased for why this runs on the full joined
+			// body instead.
+			if (this.vocabulary != null) {
+				final TagBalance.Result balance = TagBalance.match(
+					new MarkupScanner(this.vocabulary).scan(joinedBody)
+				);
+				if (!balance.isBalanced()) {
+					if (this.log != null) {
+						this.log.error(
+							"Chunked translation for " + job.getSourceFile() + " produced unbalanced" +
+								" markup after joining chunks (tags: " + balance.pairedNames() +
+								") - failing rather than writing corrupted output."
+						);
+					}
+					final String unbalanced =
+						"Joined chunked translation has unbalanced tags: " + balance.pairedNames();
+					recordJoinedBodyFailure(
+						job, new MarkdownDocument(job.getSourceContent()).getBodyContent(), joinedBody, unbalanced
+					);
+					return currentResult.withFailure("BODY", unbalanced, state.totalElapsedMillis);
+				}
+			}
+
 			return currentResult.withBody(
 				joinedBody,
 				state.totalInputTokens,
@@ -787,7 +849,12 @@ public class Translator {
 				this.inputTokenCount.addAndGet(inputTokens);
 				this.outputTokenCount.addAndGet(outputTokens);
 
-				final String translatedChunk = response.aiMessage().text();
+				String translatedChunk = response.aiMessage().text();
+				if (this.vocabulary != null) {
+					translatedChunk = applyStructuralChecks(
+						job, "chunk-" + chunk.index(), chunk.content(), translatedChunk
+					);
+				}
 				return state.withTranslatedChunk(chunk.index(), translatedChunk, inputTokens, outputTokens, elapsedMillis);
 
 			} catch (NonRetriableException e) {
