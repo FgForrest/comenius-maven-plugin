@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * Acceptance for {@link TranslationUnit#core(String)} and
@@ -77,6 +78,52 @@ public class TranslationUnitTest {
 		// the model padded its own answer with stray edge whitespace, which must not survive either
 		final String modelAnswer = "  First cs.\n\nSecond cs.  ";
 		assertEquals("\nFirst cs.\n\nSecond cs.\n", unit.wrapTranslation(source, modelAnswer));
+	}
+
+	@Test
+	@DisplayName("contentHash() is stable for the same context and text")
+	public void shouldProduceSameHashForIdenticalContextAndText() {
+		final String source = "\n\nHello world.\n\n";
+		final TranslationUnit unitA = wholeSourceAsUnit(source);
+		final TranslationUnit unitB = wholeSourceAsUnit(source);
+		assertEquals(unitA.contentHash(source), unitB.contentHash(source));
+	}
+
+	@Test
+	@DisplayName("contentHash() differs when the core text differs")
+	public void shouldProduceDifferentHashForDifferentText() {
+		final String sourceA = "\n\nHello world.\n\n";
+		final String sourceB = "\n\nGoodbye world.\n\n";
+		final TranslationUnit unitA = wholeSourceAsUnit(sourceA);
+		final TranslationUnit unitB = wholeSourceAsUnit(sourceB);
+		assertNotEquals(
+			unitA.contentHash(sourceA), unitB.contentHash(sourceB)
+		);
+	}
+
+	@Test
+	@DisplayName("contentHash() differs when the structural context differs but the text is identical")
+	public void shouldProduceDifferentHashForSameTextInDifferentContext() {
+		final String source = "Same text.";
+		final ScopeNode textNode = ScopeNode.text(0, source.length(), 0, source.length());
+
+		final TranslationUnit topLevel = TranslationUnit.of(List.of(textNode), List.of());
+		final ScopeNode lsAncestor = ScopeNode.tag("LS", 0, 0, 0, 0, true, List.of());
+		final TranslationUnit insideLs = TranslationUnit.of(List.of(textNode), List.of(lsAncestor));
+
+		assertNotEquals(
+			topLevel.contentHash(source), insideLs.contentHash(source)
+		);
+	}
+
+	@Test
+	@DisplayName("contentHash() ignores whitespace-only edge differences, same as core()")
+	public void shouldIgnoreEdgeWhitespaceDifferences() {
+		final String tightSource = "Hello world.";
+		final String paddedSource = "\n\nHello world.\n\n";
+		final TranslationUnit tight = wholeSourceAsUnit(tightSource);
+		final TranslationUnit padded = wholeSourceAsUnit(paddedSource);
+		assertEquals(tight.contentHash(tightSource), padded.contentHash(paddedSource));
 	}
 
 	private static TranslationUnit wholeSourceAsUnit(String source) {

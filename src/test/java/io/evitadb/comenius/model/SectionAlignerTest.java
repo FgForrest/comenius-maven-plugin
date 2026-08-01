@@ -273,4 +273,51 @@ public class SectionAlignerTest {
 		assertEquals(1, alignments.size());
 		assertEquals(SectionAlignment.Type.MODIFIED, alignments.get(0).type());
 	}
+
+	/**
+	 * {@link SectionAligner#align(List, List)} is a thin wrapper that extracts
+	 * {@link DocumentSection#contentHash()} and delegates to {@link SectionAligner#alignByHash}.
+	 * This pins that the hash-based core alone reproduces the same classifications, since it is
+	 * the entry point a non-{@link DocumentSection} caller (e.g. one aligning
+	 * {@link io.evitadb.comenius.structure.TranslationUnit}s) has to use instead.
+	 */
+	@Test
+	@DisplayName("alignByHash reproduces the same classifications as the DocumentSection overload")
+	void shouldAlignByHashDirectly() {
+		final List<DocumentSection> oldSections = DocumentSectionSplitter.split(
+			"# First\n\nOld content.\n\n# Second\n\nUnchanged.\n"
+		);
+		final List<DocumentSection> newSections = DocumentSectionSplitter.split(
+			"# First\n\nNew content.\n\n# Second\n\nUnchanged.\n\n# Third\n\nAdded.\n"
+		);
+
+		final List<SectionAlignment> expected = SectionAligner.align(oldSections, newSections);
+		final List<SectionAlignment> actual = SectionAligner.alignByHash(
+			oldSections.stream().map(DocumentSection::contentHash).toList(),
+			newSections.stream().map(DocumentSection::contentHash).toList()
+		);
+
+		assertEquals(expected, actual);
+		assertEquals(3, actual.size());
+		assertEquals(SectionAlignment.Type.MODIFIED, actual.get(0).type());
+		assertEquals(SectionAlignment.Type.UNCHANGED, actual.get(1).type());
+		assertEquals(SectionAlignment.Type.ADDED, actual.get(2).type());
+	}
+
+	@Test
+	@DisplayName("alignByHash treats hash collisions between unrelated items as a match, same as the section overload")
+	void shouldAlignByHashUsingOnlyTheHashValue() {
+		// alignByHash has no notion of "what a hash represents" - two unrelated items sharing a
+		// hash string are indistinguishable from the same item appearing twice, exactly like two
+		// DocumentSections with identical normalized content are today
+		final List<SectionAlignment> alignments = SectionAligner.alignByHash(
+			List.of("h1", "h2"), List.of("h1", "h3", "h2")
+		);
+
+		assertEquals(3, alignments.size());
+		assertEquals(SectionAlignment.Type.UNCHANGED, alignments.get(0).type());
+		assertEquals(SectionAlignment.Type.ADDED, alignments.get(1).type());
+		assertEquals(1, alignments.get(1).newIndex());
+		assertEquals(SectionAlignment.Type.UNCHANGED, alignments.get(2).type());
+	}
 }

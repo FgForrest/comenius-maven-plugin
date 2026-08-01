@@ -15,6 +15,8 @@ import io.evitadb.comenius.model.TranslateNewJob;
 import io.evitadb.comenius.model.TranslationJob;
 import io.evitadb.comenius.model.TranslationResult;
 import io.evitadb.comenius.structure.TagVocabulary;
+import io.evitadb.comenius.structure.TranslationUnit;
+import io.evitadb.comenius.structure.UnitPacker;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -708,18 +710,28 @@ public class TranslatorTest {
 	}
 
 	/**
-	 * A tag that wraps more than one heading forces the vocabulary-aware splitter to merge those
-	 * headings into a single section (it must not tear the tag in half). That merge is the right
-	 * call for *partitioning* content, but the validation gate must not re-split both sides with
-	 * that same merge to *compare* them: a translation that silently drops one of the merged
-	 * headings still re-merges into "1 section" on both sides, since the tag itself stays balanced
-	 * around whatever content survived. This mirrors the 2026-08-01 incident where a 64KB
-	 * multi-heading section came back truncated and the vocabulary-aware comparison saw no
-	 * mismatch at all - only the plain, heading-counting comparison catches it.
+	 * A tag that wraps more than one heading forces {@code DocumentSectionSplitter}'s
+	 * vocabulary-aware split to merge those headings into a single section (it must not tear the
+	 * tag in half). That merge is the right call for *partitioning* content, but a validation gate
+	 * must not re-split both sides with that same merge to *compare* them: a translation that
+	 * silently drops one of the merged headings still re-merges into "1 section" on both sides,
+	 * since the tag itself stays balanced around whatever content survived. This mirrors the
+	 * 2026-08-01 incident where a 64KB multi-heading section came back truncated and the
+	 * vocabulary-aware comparison saw no mismatch at all.
+	 *
+	 * Any incremental job with a real vocabulary now goes through {@code translateUnitBased}
+	 * instead of {@code translateSectionBased} (see {@code translateBody}), so this scenario
+	 * exercises that path's own defense - {@code StructuralComparator}, via
+	 * {@code applyStructuralChecks} - rather than the section splitter's comparison directly.
+	 * {@code translateSectionBased}'s own comparison fix from the same incident is still exercised
+	 * by every other section-based test in this class: those all run with {@code vocabulary ==
+	 * null}, where {@code DocumentSectionSplitter.split(text, null)} already equals
+	 * {@code split(text)} - the merge that hid the original bug cannot happen there regardless,
+	 * which is exactly why a real vocabulary always routes here instead of to that path now.
 	 */
 	@Test
-	@DisplayName("catches a dropped heading inside a tag-merged section that vocabulary-aware counting would hide")
-	void shouldCatchDroppedHeadingHiddenByVocabularyMerge() throws Exception {
+	@DisplayName("catches a dropped heading inside a tag-wrapped unit via unit-based translation")
+	void shouldCatchDroppedHeadingInWideTagSpan() throws Exception {
 		final TagVocabulary wrapVocabulary = TagVocabulary.of(Set.of("Wrap"), Set.of(), Set.of(), false);
 		final Translator vocabularyAwareTranslator = new Translator(
 			new LlmClient(mockModel), promptLoader, null, null, wrapVocabulary
@@ -757,11 +769,110 @@ public class TranslatorTest {
 
 		assertFalse(result.success(), "Should fail: 'Section B' was silently dropped");
 		assertTrue(
-			result.errorMessage().contains("Section count mismatch"),
-			"Error should report the real heading-count mismatch, got: " + result.errorMessage()
+			result.errorMessage().contains("block structure changed"),
+			"Error should report the structural mismatch, got: " + result.errorMessage()
 		);
-		// Both first attempt and retry get the same (still-truncated) response
-		assertEquals(2, mockModel.getCallCount());
+		// unit-based translation does not retry on a structural mismatch, unlike the heading-level
+		// retry the old section-based path used - one call is all this scenario should cost
+		assertEquals(1, mockModel.getCallCount());
+	}
+
+	/**
+	 * Mirrors the real shape of the 2026-08-01 incident at unit granularity: a tag ({@code Wrap})
+	 * wraps several headings, one of which was modified and two of which ({@code New A}/{@code New
+	 * B}) are genuinely new. Uses a tiny {@link UnitPacker.Settings} (the production default, 32kB,
+	 * would pack this whole fixture into one unit and make per-unit alignment unobservable - see
+	 * the constructor this test uses).
+	 *
+	 * This pins the seam flagged during design: {@code ScopeTreeReconstructor#reconstructUnits} is
+	 * keyed by node identity against the tree it renders (the *new* source's tree), so an
+	 * UNCHANGED unit's replacement value must be the *old translation's* text pulled by position -
+	 * never an old-translation {@link TranslationUnit} used as a key, which belongs to a different
+	 * tree entirely. "Section Two" and "Section Three" are unchanged and must come
+	 * back byte-identical to the existing Czech translation; "Section One" is modified and "New
+	 * A"/"New B" are added, so exactly those three - and only those three - must reach the model.
+	 */
+	@Test
+	@DisplayName("reuses unchanged units from the existing translation by position, translates only changed/added ones")
+	void shouldReuseUnchangedUnitsAndTranslateOnlyChangedOnes() throws Exception {
+		final TagVocabulary wrapVocabulary = TagVocabulary.of(Set.of("Wrap"), Set.of(), Set.of(), false);
+		// production always uses UnitPacker.Settings.defaults() (32kB) - this fixture is
+		// deliberately far too small to exceed that, so a tiny target is injected instead to make
+		// per-unit alignment observable at unit-test scale; see the constructor's own javadoc
+		final UnitPacker.Settings tinySettings = new UnitPacker.Settings(60, 300, 10);
+		final Translator packedTranslator = new Translator(
+			new LlmClient(mockModel), promptLoader, null, null, wrapVocabulary, null, tinySettings
+		);
+
+		final String oldSource = "Intro paragraph.\n\n"
+			+ "## Section One\n\nOriginal content one.\n\n"
+			+ "<Wrap>\n\n"
+			+ "## Section Two\n\nOriginal content two.\n\n"
+			+ "## Section Three\n\nOriginal content three.\n\n"
+			+ "</Wrap>\n";
+		final String newSource = "Intro paragraph.\n\n"
+			+ "## Section One\n\nModified content one.\n\n"
+			+ "<Wrap>\n\n"
+			+ "## Section Two\n\nOriginal content two.\n\n"
+			+ "## New A\n\nBrand new content A.\n\n"
+			+ "## New B\n\nBrand new content B.\n\n"
+			+ "## Section Three\n\nOriginal content three.\n\n"
+			+ "</Wrap>\n";
+		final String existingTranslation = "Uvodni odstavec.\n\n"
+			+ "## Oddil Jedna\n\nPuvodni obsah jedna.\n\n"
+			+ "<Wrap>\n\n"
+			+ "## Oddil Dva\n\nPuvodni obsah dva.\n\n"
+			+ "## Oddil Tri\n\nPuvodni obsah tri.\n\n"
+			+ "</Wrap>\n";
+
+		// queued in the order tasks are built: document order of the new source
+		mockModel.addResponse("## Oddil Jedna\n\nZmeneny obsah jedna.", 50, 30);
+		mockModel.addResponse("## Novy A\n\nZcela novy obsah A.", 50, 30);
+		mockModel.addResponse("## Novy B\n\nZcela novy obsah B.", 50, 30);
+
+		final TranslateIncrementalJob job = new TranslateIncrementalJob(
+			Path.of("/source/doc.md"),
+			Path.of("/target/cs/doc.md"),
+			Locale.forLanguageTag("cs"),
+			newSource,
+			"def456",
+			null,
+			null,
+			oldSource,
+			existingTranslation,
+			"abc123",
+			1
+		);
+
+		final TranslationResult result = packedTranslator.translate(job).toCompletableFuture().get();
+
+		assertTrue(result.success(), "expected success, got: " + result.errorMessage());
+		// exactly the modified and added units reach the model - not the unchanged ones
+		assertEquals(3, mockModel.getCallCount());
+
+		final String body = result.translatedContent();
+		assertTrue(body.contains("Uvodni odstavec."), "unchanged intro should be preserved");
+		assertTrue(body.contains("## Oddil Jedna\n\nZmeneny obsah jedna."), "modified section should be translated");
+		assertTrue(
+			body.contains("## Oddil Dva\n\nPuvodni obsah dva."),
+			"unchanged 'Section Two' must come back byte-identical to the OLD translation, not "
+				+ "re-derived from the new source - got: " + body
+		);
+		assertTrue(body.contains("## Novy A\n\nZcela novy obsah A."), "added section 'New A' should be translated");
+		assertTrue(body.contains("## Novy B\n\nZcela novy obsah B."), "added section 'New B' should be translated");
+		assertTrue(
+			body.contains("## Oddil Tri\n\nPuvodni obsah tri."),
+			"unchanged 'Section Three' must come back byte-identical to the OLD translation - got: " + body
+		);
+
+		// the ancestor tag must be re-attached exactly once around the whole run it wraps, not
+		// once per inner unit
+		assertEquals(1, body.split("<Wrap>", -1).length - 1, "expected exactly one <Wrap> open");
+		assertEquals(1, body.split("</Wrap>", -1).length - 1, "expected exactly one </Wrap> close");
+
+		final MarkdownDocument doc = new MarkdownDocument(body);
+		final HeadingAnchorIndex headings = HeadingAnchorIndex.fromDocument(doc.getDocument());
+		assertEquals(5, headings.size(), "every heading from the new source must be present exactly once");
 	}
 
 	@Test

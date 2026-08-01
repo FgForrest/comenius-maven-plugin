@@ -26,11 +26,18 @@ import io.evitadb.comenius.model.TranslateIncrementalJob;
 import io.evitadb.comenius.model.TranslateNewJob;
 import io.evitadb.comenius.model.TranslationJob;
 import io.evitadb.comenius.model.TranslationResult;
+import io.evitadb.comenius.structure.MarkdownHeadings;
 import io.evitadb.comenius.structure.MarkupScanner;
+import io.evitadb.comenius.structure.ScopeTree;
+import io.evitadb.comenius.structure.ScopeTreeBuilder;
+import io.evitadb.comenius.structure.ScopeTreeReconstructor;
 import io.evitadb.comenius.structure.StructuralComparator;
 import io.evitadb.comenius.structure.TagBalance;
 import io.evitadb.comenius.structure.TagCaseRepairer;
 import io.evitadb.comenius.structure.TagVocabulary;
+import io.evitadb.comenius.structure.TranslationUnit;
+import io.evitadb.comenius.structure.UnbalancedMarkupException;
+import io.evitadb.comenius.structure.UnitPacker;
 import io.evitadb.comenius.structure.UntranslatedContentChecker;
 import org.apache.maven.plugin.logging.Log;
 
@@ -82,6 +89,8 @@ public class Translator {
 	private final TagVocabulary vocabulary;
 	@Nullable
 	private final TranslationFailureArtifacts failureArtifacts;
+	@Nonnull
+	private final UnitPacker.Settings unitPackerSettings;
 	private final AtomicLong inputTokenCount = new AtomicLong(0);
 	private final AtomicLong outputTokenCount = new AtomicLong(0);
 
@@ -154,6 +163,37 @@ public class Translator {
 		@Nullable TagVocabulary vocabulary,
 		@Nullable TranslationFailureArtifacts failureArtifacts
 	) {
+		this(llmClient, promptLoader, executor, log, vocabulary, failureArtifacts, UnitPacker.Settings.defaults());
+	}
+
+	/**
+	 * Create a Translator with every collaborator explicit, including the size policy
+	 * {@link #translateUnitBased} uses to pack a document into translation units.
+	 *
+	 * The size policy exists as a constructor parameter rather than a hardcoded default purely for
+	 * testability: {@link UnitPacker.Settings#defaults()} targets 32kB, so any document small
+	 * enough to be a reasonable test fixture packs into a single unit regardless of its tag or
+	 * heading structure, which makes per-unit alignment (reuse vs. retranslate) unobservable in a
+	 * unit test. Production code should keep using one of the shorter constructors, which all
+	 * default to {@link UnitPacker.Settings#defaults()}.
+	 *
+	 * @param llmClient          non-null LLM client to use
+	 * @param promptLoader       non-null prompt loader for loading templates
+	 * @param executor           executor for async operations; may be null to use common pool
+	 * @param log                Maven log for diagnostic messages; may be null
+	 * @param vocabulary         corpus-derived tag vocabulary; may be null to skip the new checks
+	 * @param failureArtifacts   writer for rejected translations; may be null to discard them
+	 * @param unitPackerSettings the size policy for packing a document into translation units
+	 */
+	public Translator(
+		@Nonnull LlmClient llmClient,
+		@Nonnull PromptLoader promptLoader,
+		@Nullable Executor executor,
+		@Nullable Log log,
+		@Nullable TagVocabulary vocabulary,
+		@Nullable TranslationFailureArtifacts failureArtifacts,
+		@Nonnull UnitPacker.Settings unitPackerSettings
+	) {
 		this.llmClient = Objects.requireNonNull(llmClient, "llmClient must not be null");
 		this.promptLoader = Objects.requireNonNull(promptLoader, "promptLoader must not be null");
 		this.executor = executor;
@@ -161,6 +201,7 @@ public class Translator {
 		this.documentSplitter = new DocumentSplitter();
 		this.vocabulary = vocabulary;
 		this.failureArtifacts = failureArtifacts;
+		this.unitPackerSettings = Objects.requireNonNull(unitPackerSettings, "unitPackerSettings must not be null");
 	}
 
 	/**
@@ -361,8 +402,13 @@ public class Translator {
 
 		final TranslationJob job = currentResult.job();
 
-		// For incremental jobs, use section-based translation
+		// For incremental jobs, prefer tag-safe unit-based translation (see translateUnitBased);
+		// it needs a vocabulary to build a ScopeTree, so fall back to the older heading-based
+		// section splitter when vocabulary derivation failed for this run.
 		if (job instanceof TranslateIncrementalJob incrementalJob) {
+			if (this.vocabulary != null) {
+				return translateUnitBased(currentResult, incrementalJob, executor);
+			}
 			return translateSectionBased(currentResult, incrementalJob, executor);
 		}
 
@@ -446,11 +492,6 @@ public class Translator {
 	 * structural mismatch that remains - the three checks validated during the scope-tree
 	 * probing work, applied here to the production new-job path.
 	 *
-	 * Order matters: case must be repaired first, because a case-drifted tag is invisible to the
-	 * case-sensitive vocabulary (it does not read as a mismatch, it reads as nothing), which would
-	 * otherwise desynchronize both the untranslated-content scan and the structural comparison
-	 * that follow it.
-	 *
 	 * @param job         the translation job, for source content and target locale
 	 * @param llmResponse the model's raw response
 	 * @return the repaired response
@@ -461,21 +502,51 @@ public class Translator {
 		@Nonnull TranslationJob job,
 		@Nonnull String llmResponse
 	) throws StructuralMismatchException {
-		final TagVocabulary tagVocabulary = Objects.requireNonNull(this.vocabulary);
 		final String sourceBody = new MarkdownDocument(job.getSourceContent()).getBodyContent();
+		return applyStructuralChecks(job, "body", sourceBody, llmResponse);
+	}
 
-		final String caseRepaired = TagCaseRepairer.repair(tagVocabulary, sourceBody, llmResponse);
+	/**
+	 * Repairs tag-case drift, autofixes untranslated leaf content, and hard-fails on any
+	 * structural mismatch that remains - the three checks validated during the scope-tree
+	 * probing work.
+	 *
+	 * Order matters: case must be repaired first, because a case-drifted tag is invisible to the
+	 * case-sensitive vocabulary (it does not read as a mismatch, it reads as nothing), which would
+	 * otherwise desynchronize both the untranslated-content scan and the structural comparison
+	 * that follow it.
+	 *
+	 * @param job         the translation job, for target locale and failure recording
+	 * @param unit        identifies the checked unit for failure artifacts, e.g. {@code body} or
+	 *                    {@code unit-4}
+	 * @param sourceText  the original text the response is checked against - the whole document
+	 *                    body for a new-job translation, or a single unit's full span for
+	 *                    unit-based incremental translation
+	 * @param llmResponse the model's raw response
+	 * @return the repaired response
+	 * @throws StructuralMismatchException if the structure still does not match after repair
+	 */
+	@Nonnull
+	private String applyStructuralChecks(
+		@Nonnull TranslationJob job,
+		@Nonnull String unit,
+		@Nonnull String sourceText,
+		@Nonnull String llmResponse
+	) throws StructuralMismatchException {
+		final TagVocabulary tagVocabulary = Objects.requireNonNull(this.vocabulary);
+
+		final String caseRepaired = TagCaseRepairer.repair(tagVocabulary, sourceText, llmResponse);
 		final String autofixed = autofixUntranslatedContent(
-			tagVocabulary, sourceBody, caseRepaired, job.getLocale()
+			tagVocabulary, sourceText, caseRepaired, job.getLocale()
 		);
 
-		final List<String> problems = StructuralComparator.compare(tagVocabulary, sourceBody, autofixed);
+		final List<String> problems = StructuralComparator.compare(tagVocabulary, sourceText, autofixed);
 		if (!problems.isEmpty()) {
 			final Map<String, String> attachments = new LinkedHashMap<>();
-			attachments.put("source.md", sourceBody);
+			attachments.put("source.md", sourceText);
 			attachments.put("response.md", llmResponse);
 			attachments.put("after-repair.md", autofixed);
-			recordFailure(job, "body", problems, attachments);
+			recordFailure(job, unit, problems, attachments);
 			throw new StructuralMismatchException(problems);
 		}
 		return autofixed;
@@ -982,6 +1053,389 @@ public class Translator {
 				state.totalElapsedMillis
 			);
 		});
+	}
+
+	/**
+	 * Translates an incremental job using tag-safe unit packing instead of heading-based section
+	 * splitting.
+	 *
+	 * {@link DocumentSectionSplitter}'s vocabulary-aware split merges every heading inside a still
+	 * -open custom tag into one section, because a section boundary must never tear a tag in half.
+	 * For a document where such a tag legitimately wraps many headings (a language-switch block
+	 * spanning most of the file, say), that merge collapses dozens of headings into a single
+	 * oversized section - defeating the point of incremental translation and risking a truncated
+	 * response the structure checks then struggle to attribute correctly. See the 2026-08-01
+	 * incident on evitaDB's capture-changes.md, where exactly this collapsed 38 headings into one
+	 * 64KB section.
+	 *
+	 * {@link ScopeTreeBuilder} and {@link UnitPacker} solve the same "never tear a tag" constraint
+	 * without that collapse: a {@link TranslationUnit} is always a sibling run that tiles its
+	 * parent's content range, so an ancestor tag that wraps many headings is simply never part of
+	 * any unit's text - it is carried as prompt context via {@link TranslationUnit#describeContext}
+	 * instead, and {@link ScopeTreeReconstructor#reconstructUnits} re-attaches it from the source,
+	 * verbatim, on the way back out. A unit therefore stays within {@link UnitPacker.Settings}'
+	 * target size regardless of how far an enclosing tag spans.
+	 *
+	 * Old-source units are matched to their existing-translation counterparts positionally, the
+	 * same way {@link #findTranslationForOldSection} does for heading sections - gated by
+	 * {@link #unitsCorrespond}, since Czech and English block structure can legitimately diverge
+	 * even when the heading structure has already been validated to match. Old-vs-new alignment
+	 * reuses {@link SectionAligner#alignByHash}, the same tested LCS algorithm the heading-based
+	 * path uses, fed unit content hashes instead of section hashes.
+	 *
+	 * @param currentResult the current phase result
+	 * @param job           the incremental translation job
+	 * @param executor      the executor for async operations
+	 * @return CompletionStage with updated PhaseResult
+	 */
+	@Nonnull
+	private CompletionStage<PhaseResult> translateUnitBased(
+		@Nonnull PhaseResult currentResult,
+		@Nonnull TranslateIncrementalJob job,
+		@Nonnull Executor executor
+	) {
+		final TagVocabulary tagVocabulary = Objects.requireNonNull(this.vocabulary);
+
+		final String oldSourceBody = new MarkdownDocument(job.getOriginalSource()).getBodyContent();
+		final String newSourceBody = new MarkdownDocument(job.getSourceContent()).getBodyContent();
+		final String existingTranslationBody = job.getExistingTranslationBody();
+
+		final ScopeTreeBuilder builder = new ScopeTreeBuilder(tagVocabulary);
+		final UnitPacker packer = new UnitPacker(tagVocabulary, this.unitPackerSettings);
+
+		final ScopeTree oldTree;
+		final ScopeTree newTree;
+		final ScopeTree csTree;
+		try {
+			oldTree = builder.build(oldSourceBody, job.getSourceFile() + " (old source)");
+			newTree = builder.build(newSourceBody, job.getSourceFile() + " (new source)");
+			csTree = builder.build(existingTranslationBody, job.getTargetFile() + " (existing translation)");
+		} catch (final UnbalancedMarkupException e) {
+			if (this.log != null) {
+				this.log.warn(
+					"Could not build a scope tree for " + job.getSourceFile() + ": " + e.getMessage() +
+						" - falling back to full retranslation."
+				);
+			}
+			return translateFullBodyFallback(currentResult, job, executor);
+		}
+
+		final List<TranslationUnit> oldUnits = packer.pack(oldTree).stream()
+			.filter(TranslationUnit::isTranslatable).toList();
+		final List<TranslationUnit> newUnits = packer.pack(newTree).stream()
+			.filter(TranslationUnit::isTranslatable).toList();
+		final List<TranslationUnit> csUnits = packer.pack(csTree).stream()
+			.filter(TranslationUnit::isTranslatable).toList();
+
+		if (!unitsCorrespond(oldUnits, oldSourceBody, csUnits, existingTranslationBody)) {
+			if (this.log != null) {
+				this.log.warn(
+					"Unit structure of the old source and the existing translation does not correspond" +
+						" for " + job.getSourceFile() + " - falling back to full retranslation."
+				);
+			}
+			return translateFullBodyFallback(currentResult, job, executor);
+		}
+
+		final List<String> oldHashes = oldUnits.stream().map(unit -> unit.contentHash(oldSourceBody)).toList();
+		final List<String> newHashes = newUnits.stream().map(unit -> unit.contentHash(newSourceBody)).toList();
+		final List<SectionAlignment> alignments = SectionAligner.alignByHash(oldHashes, newHashes);
+
+		final String[] resultTexts = new String[newUnits.size()];
+		final List<UnitTranslationTask> tasks = new ArrayList<>();
+		for (final SectionAlignment alignment : alignments) {
+			switch (alignment.type()) {
+				case UNCHANGED -> resultTexts[alignment.newIndex()] =
+					csUnits.get(alignment.oldIndex()).text(existingTranslationBody);
+				case MODIFIED, ADDED -> tasks.add(
+					new UnitTranslationTask(alignment.newIndex(), newUnits.get(alignment.newIndex()))
+				);
+				case DELETED -> {
+					// old unit has no counterpart in the new document - nothing to keep
+				}
+			}
+		}
+
+		CompletionStage<UnitBasedState> stage =
+			CompletableFuture.completedFuture(new UnitBasedState(currentResult, resultTexts));
+
+		for (final UnitTranslationTask task : tasks) {
+			stage = stage.thenCompose(state -> {
+				if (!state.success()) {
+					return CompletableFuture.completedFuture(state);
+				}
+				return translateUnit(state, job, task, newSourceBody, executor);
+			});
+		}
+
+		return stage.thenApply(state -> {
+			if (!state.success()) {
+				return state.toFailedPhaseResult();
+			}
+
+			final Map<TranslationUnit, String> replacements = state.buildReplacements(newUnits);
+			final String joinedBody;
+			try {
+				joinedBody = ScopeTreeReconstructor.reconstructUnits(newTree, replacements);
+			} catch (final IllegalArgumentException e) {
+				final String message = "Failed to reconstruct unit-based translation for " +
+					job.getSourceFile() + ": " + e.getMessage();
+				if (this.log != null) {
+					this.log.error(message);
+				}
+				return currentResult.withFailure("BODY", message, state.totalElapsedMillis);
+			}
+
+			// Safety net: a unit-level structural mismatch is caught per-unit by
+			// applyStructuralChecks before this point is ever reached, but a heading can still be
+			// lost wholesale if the model returns fewer headings than a unit's core actually had -
+			// the same defect class the heading-based path's third safety net exists to catch.
+			final int sourceHeadingCount = HeadingAnchorIndex.fromDocument(
+				new MarkdownDocument(newSourceBody).getDocument()
+			).size();
+			final int translatedHeadingCount = HeadingAnchorIndex.fromDocument(
+				new MarkdownDocument(joinedBody).getDocument()
+			).size();
+			if (sourceHeadingCount != translatedHeadingCount) {
+				final String message = "Unit-based incremental translation for " + job.getSourceFile() +
+					" exposes " + translatedHeadingCount + " parsed headings while its source has " +
+					sourceHeadingCount + " - failing rather than writing corrupted output.";
+				if (this.log != null) {
+					this.log.error(message);
+				}
+				recordJoinedBodyFailure(job, newSourceBody, joinedBody, message);
+				return currentResult.withFailure("BODY", message, state.totalElapsedMillis);
+			}
+
+			// Safety net: tag tearing should be structurally impossible under unit-based
+			// reconstruction (an ancestor tag is never part of any unit's own text), but this stays
+			// as a cheap regression lock rather than trusting that invariant blindly.
+			final TagBalance.Result balance = TagBalance.match(new MarkupScanner(tagVocabulary).scan(joinedBody));
+			if (!balance.isBalanced()) {
+				final String message = "Unit-based incremental translation for " + job.getSourceFile() +
+					" produced unbalanced markup after reconstruction (tags: " + balance.pairedNames() +
+					") - this should be unreachable under unit-based reconstruction; failing rather" +
+					" than writing corrupted output.";
+				if (this.log != null) {
+					this.log.error(message);
+				}
+				recordJoinedBodyFailure(job, newSourceBody, joinedBody, message);
+				return currentResult.withFailure("BODY", message, state.totalElapsedMillis);
+			}
+
+			return currentResult.withBody(
+				joinedBody,
+				state.totalInputTokens,
+				state.totalOutputTokens,
+				state.totalElapsedMillis
+			);
+		});
+	}
+
+	/**
+	 * Checks whether old-source units correspond positionally to existing-translation units, the
+	 * precondition for reusing the existing translation's text for an UNCHANGED unit by index.
+	 *
+	 * Matching by {@link TranslationUnit#contextKey()} alone is not enough to trust at face value:
+	 * a shallow document collapses to very few, very similar context paths, so two units can share
+	 * a context by coincidence rather than correspondence. Requiring the parsed heading count
+	 * inside each pair to match too is what actually discriminates a genuine structural mirror from
+	 * a coincidental one - see the 2026-08-01 investigation, where {@code contextKey} alone matched
+	 * trivially at 6 units but heading counts (1/4/5/15/14/0 on both sides) confirmed it was real.
+	 *
+	 * @param oldUnits  units packed from the source at the previously translated commit
+	 * @param oldSource the source text those units were packed from
+	 * @param csUnits   units packed from the existing translation
+	 * @param csSource  the existing translation text those units were packed from
+	 * @return {@code true} when positional old-to-translation mapping can be trusted
+	 */
+	private boolean unitsCorrespond(
+		@Nonnull List<TranslationUnit> oldUnits,
+		@Nonnull String oldSource,
+		@Nonnull List<TranslationUnit> csUnits,
+		@Nonnull String csSource
+	) {
+		if (oldUnits.size() != csUnits.size()) {
+			return false;
+		}
+		for (int i = 0; i < oldUnits.size(); i++) {
+			final TranslationUnit oldUnit = oldUnits.get(i);
+			final TranslationUnit csUnit = csUnits.get(i);
+			if (!oldUnit.contextKey().equals(csUnit.contextKey())) {
+				return false;
+			}
+			final int oldHeadingCount = MarkdownHeadings.scan(oldUnit.core(oldSource)).size();
+			final int csHeadingCount = MarkdownHeadings.scan(csUnit.core(csSource)).size();
+			if (oldHeadingCount != csHeadingCount) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Translates a single unit: builds the unit prompt, sends it, restores the unit's original
+	 * edges, and runs it through the same repair/autofix/structural-compare pipeline
+	 * {@link #applyStructuralChecks} applies to a whole new-job document, scoped to this unit.
+	 *
+	 * @param state    the current unit-based translation state
+	 * @param job      the incremental translation job
+	 * @param task     the unit to translate and its position in the new document
+	 * @param source   the current source text the unit was packed from
+	 * @param executor the executor for async operations
+	 * @return CompletionStage with updated state
+	 */
+	@Nonnull
+	private CompletionStage<UnitBasedState> translateUnit(
+		@Nonnull UnitBasedState state,
+		@Nonnull TranslateIncrementalJob job,
+		@Nonnull UnitTranslationTask task,
+		@Nonnull String source,
+		@Nonnull Executor executor
+	) {
+		final TranslationUnit unit = task.unit();
+		final String context = unit.describeContext(source);
+
+		final Map<String, String> systemPlaceholders = new HashMap<>();
+		systemPlaceholders.put("locale", job.getLocale().getDisplayLanguage(Locale.ENGLISH));
+		systemPlaceholders.put("localeTag", job.getLocale().toLanguageTag());
+		final String systemPrompt = this.promptLoader.loadAndInterpolate(
+			"translate-unit-system.txt", systemPlaceholders
+		);
+
+		final Map<String, String> userPlaceholders = new HashMap<>();
+		userPlaceholders.put(
+			"customInstructions",
+			job.getInstructions() != null && !job.getInstructions().isBlank() ? job.getInstructions() : ""
+		);
+		userPlaceholders.put("context", context.isEmpty() ? "the top level of the document" : context);
+		userPlaceholders.put("sourceContent", unit.core(source));
+		final String userPrompt = this.promptLoader.loadAndInterpolate(
+			"translate-unit-user.txt", userPlaceholders
+		);
+
+		return CompletableFuture.supplyAsync(() -> {
+			final long startTime = System.currentTimeMillis();
+			try {
+				final ChatResponse response = this.llmClient.chat(List.of(
+					SystemMessage.from(systemPrompt), UserMessage.from(userPrompt)
+				));
+				final long[] tokens = accumulateTokens(response);
+				final String wrapped = unit.wrapTranslation(source, stripCodeFence(response.aiMessage().text()));
+				final String fixed = applyStructuralChecks(
+					job, "unit-" + task.newIndex(), unit.text(source), wrapped
+				);
+
+				final long elapsedMillis = System.currentTimeMillis() - startTime;
+				return state.withTranslatedUnit(task.newIndex(), fixed, tokens[0], tokens[1], elapsedMillis);
+
+			} catch (final NonRetriableException e) {
+				throw e;
+			} catch (final Exception e) {
+				final long elapsedMillis = System.currentTimeMillis() - startTime;
+				return state.withFailure("BODY_UNIT_" + task.newIndex(), e.getMessage(), elapsedMillis);
+			}
+		}, executor);
+	}
+
+	/**
+	 * Removes a code fence the model may have wrapped its answer in, despite being told not to.
+	 *
+	 * @param text the model's reply
+	 * @return the reply without an enclosing fence
+	 */
+	@Nonnull
+	private static String stripCodeFence(@Nonnull String text) {
+		final String trimmed = text.strip();
+		if (!trimmed.startsWith("```") || !trimmed.endsWith("```")) {
+			return text;
+		}
+		final int firstNewline = trimmed.indexOf('\n');
+		if (firstNewline < 0) {
+			return text;
+		}
+		return trimmed.substring(firstNewline + 1, trimmed.length() - 3);
+	}
+
+	/**
+	 * Internal record for a unit that needs translation, and its position in the new document's
+	 * unit list.
+	 *
+	 * @param newIndex index in the new document's unit list
+	 * @param unit     the unit to translate
+	 */
+	private record UnitTranslationTask(
+		int newIndex,
+		@Nonnull TranslationUnit unit
+	) {}
+
+	/**
+	 * Internal state for tracking unit-based translation progress.
+	 */
+	private static class UnitBasedState {
+		private final PhaseResult originalResult;
+		private final String[] resultTexts;
+		private long totalInputTokens = 0;
+		private long totalOutputTokens = 0;
+		private long totalElapsedMillis = 0;
+		private String errorPhase = null;
+		private String errorMessage = null;
+
+		UnitBasedState(PhaseResult originalResult, String[] resultTexts) {
+			this.originalResult = originalResult;
+			this.resultTexts = resultTexts;
+		}
+
+		boolean success() {
+			return this.errorPhase == null;
+		}
+
+		UnitBasedState withTranslatedUnit(
+			int newIndex, String text, long inputTokens, long outputTokens, long elapsedMillis
+		) {
+			this.resultTexts[newIndex] = text;
+			this.totalInputTokens += inputTokens;
+			this.totalOutputTokens += outputTokens;
+			this.totalElapsedMillis += elapsedMillis;
+			return this;
+		}
+
+		UnitBasedState withFailure(String phase, String message, long elapsedMillis) {
+			this.errorPhase = phase;
+			this.errorMessage = message;
+			this.totalElapsedMillis += elapsedMillis;
+			return this;
+		}
+
+		/**
+		 * Builds the reconstruction replacement map, keyed by the new document's own units -
+		 * {@link ScopeTreeReconstructor#reconstructUnits} matches replacement keys against the tree
+		 * it renders, so a unit from any other tree (the old source's, the existing translation's)
+		 * would not match anything, or would match the wrong node if a coincidentally-identical
+		 * unit existed. Every unit this state was translated for already produced a new-document
+		 * unit as its key at construction time; this only pairs them back up.
+		 *
+		 * @param newUnits the new document's units, in the same order resultTexts was indexed by
+		 * @return the replacement map for reconstructUnits
+		 */
+		Map<TranslationUnit, String> buildReplacements(List<TranslationUnit> newUnits) {
+			final Map<TranslationUnit, String> replacements = new HashMap<>();
+			for (int i = 0; i < newUnits.size(); i++) {
+				final String text = this.resultTexts[i];
+				if (text != null) {
+					replacements.put(newUnits.get(i), text);
+				}
+			}
+			return replacements;
+		}
+
+		PhaseResult toFailedPhaseResult() {
+			return this.originalResult.withFailure(
+				this.errorPhase,
+				this.errorMessage,
+				this.totalElapsedMillis
+			);
+		}
 	}
 
 	/**

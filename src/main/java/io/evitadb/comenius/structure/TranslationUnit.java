@@ -1,6 +1,10 @@
 package io.evitadb.comenius.structure;
 
 import javax.annotation.Nonnull;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
 
@@ -211,6 +215,34 @@ public record TranslationUnit(
 			}
 		}
 		return result.toString();
+	}
+
+	/**
+	 * A stable content hash combining this unit's structural context and its core text.
+	 *
+	 * This is the identity an alignment such as
+	 * {@link io.evitadb.comenius.model.SectionAligner#alignByHash} matches on: two units hash
+	 * equal only when they sit at the same place in the tag/heading structure
+	 * ({@link #contextKey()}) *and* their translatable text ({@link #core(String)}) is
+	 * byte-identical after the same trim-and-normalize-line-endings treatment
+	 * {@code DocumentSection.contentHash()} uses for section-based alignment. Combining the two
+	 * means a unit that moved to a different structural context is never mistaken for one that
+	 * merely kept its text - a plain text-only hash could not tell those apart.
+	 *
+	 * @param source the exact string the tree was built from
+	 * @return hex-encoded SHA-256 hash
+	 */
+	@Nonnull
+	public String contentHash(@Nonnull String source) {
+		final String normalized = contextKey() + ' ' + core(source).trim().replace("\r\n", "\n");
+		try {
+			final MessageDigest digest = MessageDigest.getInstance("SHA-256");
+			final byte[] hash = digest.digest(normalized.getBytes(StandardCharsets.UTF_8));
+			return HexFormat.of().formatHex(hash);
+		} catch (NoSuchAlgorithmException e) {
+			// SHA-256 is guaranteed to be available in every JVM
+			throw new IllegalStateException("SHA-256 not available", e);
+		}
 	}
 
 	/**

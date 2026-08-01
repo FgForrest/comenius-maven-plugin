@@ -38,18 +38,37 @@ public final class SectionAligner {
 		Objects.requireNonNull(oldSections, "oldSections must not be null");
 		Objects.requireNonNull(newSections, "newSections must not be null");
 
-		// Extract hash sequences
-		final String[] oldHashes = new String[oldSections.size()];
-		for (int i = 0; i < oldSections.size(); i++) {
-			oldHashes[i] = oldSections.get(i).contentHash();
-		}
-		final String[] newHashes = new String[newSections.size()];
-		for (int i = 0; i < newSections.size(); i++) {
-			newHashes[i] = newSections.get(i).contentHash();
-		}
+		return alignByHash(
+			oldSections.stream().map(DocumentSection::contentHash).toList(),
+			newSections.stream().map(DocumentSection::contentHash).toList()
+		);
+	}
+
+	/**
+	 * Aligns old and new items by content hash alone, producing alignment records ordered by new
+	 * document position. DELETED items are placed at the position where they were removed (before
+	 * the next anchor).
+	 *
+	 * This is the item-agnostic core of {@link #align(List, List)}: it never looks at what an item
+	 * actually is, only at the hash sequence identifying it, which is what lets the same tested LCS
+	 * alignment serve heading-delimited {@link DocumentSection}s and tag-safe
+	 * {@link io.evitadb.comenius.structure.TranslationUnit}s alike - the caller just supplies
+	 * whichever hash sequence its own item type produces.
+	 *
+	 * @param oldHashes content hashes of items from the previously translated source, in order
+	 * @param newHashes content hashes of items from the current source, in order
+	 * @return list of alignment records ordered by output position
+	 */
+	@Nonnull
+	public static List<SectionAlignment> alignByHash(
+		@Nonnull List<String> oldHashes,
+		@Nonnull List<String> newHashes
+	) {
+		Objects.requireNonNull(oldHashes, "oldHashes must not be null");
+		Objects.requireNonNull(newHashes, "newHashes must not be null");
 
 		// Compute LCS indices
-		final List<int[]> lcs = computeLcs(oldHashes, newHashes);
+		final List<int[]> lcs = computeLcs(oldHashes.toArray(new String[0]), newHashes.toArray(new String[0]));
 
 		// Build alignments by walking between LCS anchors
 		final List<SectionAlignment> alignments = new ArrayList<>();
@@ -73,7 +92,7 @@ public final class SectionAligner {
 		}
 
 		// Process trailing gap after last anchor
-		processGap(alignments, oldPos, oldHashes.length, newPos, newHashes.length);
+		processGap(alignments, oldPos, oldHashes.size(), newPos, newHashes.size());
 
 		return alignments;
 	}
