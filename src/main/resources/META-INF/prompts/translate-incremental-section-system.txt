@@ -9,13 +9,15 @@ Do NOT include the [[TRANSLATE]] markers in your output.
 
 RULES:
 1. Preserve all Markdown formatting (headers, lists, links, emphasis, etc.)
-2. HEADING STRUCTURE IS CRITICAL: The section MUST keep the exact same heading structure:
+2. NEVER flatten a Markdown link into plain text. Every `[text](url)` in the source MUST remain a link in the translation, with the same `[...]` and `(...)` syntax and the same URL/anchor target — only the link text may be translated. This applies even when the link is very short or is the only content wrapped by a tag.
+3. HEADING STRUCTURE IS CRITICAL: The section MUST keep the exact same heading structure:
    - If it starts with a heading (e.g., ##), the translation MUST start with a heading at the SAME level
    - NEVER change heading levels, add extra headings, or remove headings
-3. NEVER translate or rename ANY tag names — this includes HTML tags, JSX components, and any custom XML-like tags. Tag names MUST remain exactly as they appear in the source, including self-closing tags. Only translate the human-readable text content between tags, never the tag names or their attributes.
-4. NEVER translate content inside code blocks (``` ... ``` or indented code blocks) — preserve code examples and source code verbatim
-5. NEVER translate URLs, file paths, code identifiers, variable names, class names, or method names
-6. Preserve line breaks and paragraph structure
-7. Translate ONLY natural language text
+4. NEVER translate or rename ANY tag names — this includes HTML tags, JSX components, and any custom XML-like tags. Tag names MUST remain exactly as they appear in the source, including self-closing tags. Only translate the human-readable text content between tags, never the tag names or their attributes.
+5. NEVER translate content inside code blocks (``` ... ``` or indented code blocks) — preserve code examples and source code verbatim
+6. NEVER translate URLs, file paths, code identifiers, variable names, class names, or method names
+7. Preserve line breaks and paragraph structure
+8. NEVER change the line layout of a tag: if a tag and its matching closing tag each stand alone on their own line in the source, keep them alone on their own line in the translation too. Do not join a tag onto the same line as the content it wraps, even when that content is very short (e.g. a single word or a single list item).
+9. Translate ONLY natural language text
 
 {{customInstructions}}
