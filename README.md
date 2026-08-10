@@ -89,6 +89,22 @@ The plugin provides five actions via the `comenius.action` parameter:
 | `translatableFrontMatterFields` | `comenius.translatableFrontMatterFields` | - | Front matter fields to translate (e.g., title, perex) |
 | `customFrontMatter` | `comenius.customFrontMatter` | - | Custom key-value pairs to add to translated files' front matter |
 | `failureDir` | `comenius.failureDir` | `${project.build.directory}/comenius-failures` | Directory to keep translations rejected by a structural gate, for diagnosis; blank disables it |
+| `allowShallowRepository` | `comenius.allowShallowRepository` | `false` | Permit `translate` to run in a shallow clone, where recorded commit provenance is wrong (see below) |
+
+### Shallow clones
+
+`translate` refuses to run in a shallow repository. Each translated file records the commit its
+source was last changed in, taken from `git log -1 -- <file>`. A shallow clone cannot see past its
+graft boundaries, so it reports the boundary commit for every file whose real last change is older
+than the truncation point — a plausible-looking hash with nothing to do with that file, written into
+the front matter of the whole corpus.
+
+Run `git fetch --unshallow` before translating, or pass
+`-Dcomenius.allowShallowRepository=true` to accept the wrong provenance deliberately.
+
+If a recorded `commit:` value cannot be found in the repository at all — history was rewritten, or
+the translation came from a different clone — the file is retranslated in full with a warning
+instead of failing.
 
 ## Recommended Workflow
 

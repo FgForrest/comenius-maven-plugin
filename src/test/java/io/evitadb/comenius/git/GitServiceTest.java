@@ -384,6 +384,73 @@ public class GitServiceTest {
 		assertTrue(infoOpt.isEmpty());
 	}
 
+	@Test
+	@DisplayName("shouldReportFullCloneAsNotShallow")
+	void shouldReportFullCloneAsNotShallow() throws Exception {
+		final Path file = tempDir.resolve("initial.md");
+		Files.writeString(file, "initial");
+		runGit("add", "initial.md");
+		runGit("commit", "-m", "Initial commit");
+
+		assertFalse(gitService.isShallowRepository());
+	}
+
+	@Test
+	@DisplayName("shouldReportShallowCloneAsShallow")
+	void shouldReportShallowCloneAsShallow() throws Exception {
+		final Path file = tempDir.resolve("initial.md");
+		Files.writeString(file, "first");
+		runGit("add", "initial.md");
+		runGit("commit", "-m", "First commit");
+		Files.writeString(file, "second");
+		runGit("commit", "-am", "Second commit");
+
+		final Path shallowDir = Files.createTempDirectory("git-service-shallow-");
+		try {
+			runGit("clone", "--depth", "1", "file://" + tempDir, shallowDir.toString());
+			final GitService shallowService = new GitService(shallowDir);
+
+			assertTrue(shallowService.isShallowRepository());
+		} finally {
+			deleteRecursively(shallowDir);
+		}
+	}
+
+	@Test
+	@DisplayName("shouldDetectWhetherRecordedCommitIsReachable")
+	void shouldDetectWhetherRecordedCommitIsReachable() throws Exception {
+		final Path file = tempDir.resolve("initial.md");
+		Files.writeString(file, "initial");
+		runGit("add", "initial.md");
+		runGit("commit", "-m", "Initial commit");
+		final String real = gitService.getCurrentCommitHash(file).orElseThrow();
+
+		assertTrue(gitService.isCommitReachable(real));
+		assertFalse(gitService.isCommitReachable("bb96ccb40cb364520a11f5b6d733ff33c7e7a15c"));
+	}
+
+	@Test
+	@DisplayName("shouldFallBackToFullRetranslationWhenRecordedCommitIsUnreachable")
+	void shouldFallBackToFullRetranslationWhenRecordedCommitIsUnreachable() throws Exception {
+		final Path file = tempDir.resolve("doc.md");
+		Files.writeString(file, "first");
+		runGit("add", "doc.md");
+		runGit("commit", "-m", "First commit");
+		Files.writeString(file, "second");
+		runGit("commit", "-am", "Second commit");
+
+		// A hash from a rewritten history or a different clone - well-formed but absent here
+		final Optional<CommitInfo> infoOpt = gitService.buildCommitInfo(
+			file, "bb96ccb40cb364520a11f5b6d733ff33c7e7a15c"
+		);
+
+		assertTrue(infoOpt.isPresent());
+		final CommitInfo info = infoOpt.get();
+		assertTrue(info.isNewFile(), "An unreachable base commit must degrade to a full retranslation");
+		assertNull(info.translatedCommit());
+		assertEquals(0, info.commitCount());
+	}
+
 	private static void deleteRecursively(Path path) throws IOException {
 		if (Files.exists(path)) {
 			Files.walk(path)

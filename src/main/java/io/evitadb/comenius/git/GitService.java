@@ -55,6 +55,44 @@ public final class GitService {
 	}
 
 	/**
+	 * Returns whether the repository is a shallow clone.
+	 * Uses: `git rev-parse --is-shallow-repository`
+	 *
+	 * In a shallow clone the grafted boundary commits have no visible parents, so git treats
+	 * them as introducing the entire tree. Every file whose real last modification predates the
+	 * boundary therefore answers `git log -1 -- <file>` with the boundary commit rather than its
+	 * own history. Provenance recorded from such a repository is wrong, looks like a plausible
+	 * commit hash, and is expensive to detect after the fact.
+	 *
+	 * @return true if the repository history is truncated
+	 * @throws IOException if git command execution fails
+	 */
+	public boolean isShallowRepository() throws IOException {
+		final String output = executeGitCommand("rev-parse", "--is-shallow-repository");
+		return "true".equals(output.trim());
+	}
+
+	/**
+	 * Returns whether the given revision exists in this repository and resolves to a commit.
+	 * Uses: `git cat-file -e <commit>^{commit}`
+	 *
+	 * A recorded commit can become unreachable when history is rewritten, when the translation
+	 * was produced from a different clone, or when the repository is shallow.
+	 *
+	 * @param commit the commit hash to test
+	 * @return true if the commit is present and reachable
+	 */
+	public boolean isCommitReachable(@Nonnull String commit) {
+		Objects.requireNonNull(commit, "commit must not be null");
+		try {
+			executeGitCommand("cat-file", "-e", commit + "^{commit}");
+			return true;
+		} catch (IOException e) {
+			return false;
+		}
+	}
+
+	/**
 	 * Checks if a file is fully committed (no uncommitted changes and tracked by git).
 	 * Uses: `git status --porcelain -- <file>`
 	 *
@@ -182,6 +220,13 @@ public final class GitService {
 		// If same commit, file is up-to-date
 		if (translatedCommit.equals(currentCommit)) {
 			return Optional.of(new CommitInfo(currentCommit, translatedCommit, 0, null));
+		}
+
+		// A recorded commit that this repository does not have cannot anchor a diff range -
+		// `git rev-list a..b` fails outright. Report it as a new file so the caller falls back
+		// to a full retranslation instead of losing the document for good.
+		if (!isCommitReachable(translatedCommit)) {
+			return Optional.of(new CommitInfo(currentCommit, null, 0, null));
 		}
 
 		// Gather commit count and original source for incremental update

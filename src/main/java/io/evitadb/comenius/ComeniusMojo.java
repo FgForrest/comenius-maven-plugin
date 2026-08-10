@@ -111,6 +111,13 @@ public class ComeniusMojo extends AbstractMojo {
 	@Parameter(property = "comenius.parallelism", defaultValue = "4")
 	private int parallelism = 4;
 
+	/**
+	 * When true, allow the translate action to run in a shallow clone. Off by default because a
+	 * shallow repository silently records the graft boundary as every file's last commit.
+	 */
+	@Parameter(property = "comenius.allowShallowRepository", defaultValue = "false")
+	private boolean allowShallowRepository = false;
+
 	/** Regex patterns to exclude directories/files from processing. */
 	@Parameter(property = "comenius.excludedFilePatterns")
 	private List<String> excludedFilePatterns;
@@ -212,6 +219,7 @@ public class ComeniusMojo extends AbstractMojo {
 		log.info(" - limit: " + this.limit);
 		log.info(" - dryRun: " + this.dryRun);
 		log.info(" - parallelism: " + this.parallelism);
+		log.info(" - allowShallowRepository: " + this.allowShallowRepository);
 		log.info(" - failureDir: " + (this.failureDir == null || this.failureDir.isBlank()
 			? "<disabled, rejected translations are discarded>" : this.failureDir));
 		if (this.excludedFilePatterns == null || this.excludedFilePatterns.isEmpty()) {
@@ -347,6 +355,7 @@ public class ComeniusMojo extends AbstractMojo {
 			// Find git repository root
 			final Path gitRoot = findGitRoot(root);
 			final GitService gitService = new GitService(gitRoot);
+			verifyRepositoryDepth(log, gitService, gitRoot);
 
 			// Create translator and executor only for non-dry-run
 			// Use a shared ForkJoinPool for all parallel work (translations and link correction)
@@ -860,6 +869,44 @@ public class ComeniusMojo extends AbstractMojo {
 	}
 
 	/**
+	 * Refuses to translate from a shallow clone unless explicitly allowed.
+	 *
+	 * Every translated document records the commit its source was last changed in, obtained from
+	 * `git log -1 -- <file>`. A shallow clone cannot see past its graft boundaries, so it reports
+	 * the boundary commit for every file whose real last change is older than the truncation
+	 * point. The result is a plausible-looking hash that has nothing to do with the file, written
+	 * into the corpus, and only discoverable by comparing against a full clone afterwards.
+	 *
+	 * @param log        Maven log for output
+	 * @param gitService the git service for the repository
+	 * @param gitRoot    the repository root, for the message
+	 * @throws MojoExecutionException if the repository is shallow and the override is not set
+	 * @throws IOException            if the git command fails
+	 */
+	private void verifyRepositoryDepth(
+		@Nonnull Log log,
+		@Nonnull GitService gitService,
+		@Nonnull Path gitRoot
+	) throws MojoExecutionException, IOException {
+		if (!gitService.isShallowRepository()) {
+			return;
+		}
+		if (this.allowShallowRepository) {
+			log.warn("[WARN] " + gitRoot + " is a shallow clone and " +
+				"-Dcomenius.allowShallowRepository=true was set. Recorded commit provenance will" +
+				" be the graft boundary rather than each file's real last-touching commit.");
+			return;
+		}
+		throw new MojoExecutionException(
+			"Refusing to translate: " + gitRoot + " is a shallow clone. Per-file commit" +
+				" provenance would be recorded as the graft boundary rather than each file's" +
+				" real last-touching commit, silently corrupting the 'commit' front matter field" +
+				" for every file older than the truncation point. Run 'git fetch --unshallow'," +
+				" or pass -Dcomenius.allowShallowRepository=true to proceed anyway."
+		);
+	}
+
+	/**
 	 * Corrects links in translated files and validates the results.
 	 *
 	 * This method performs post-translation link correction:
@@ -1094,6 +1141,7 @@ public class ComeniusMojo extends AbstractMojo {
 	void setLimit(final int limit) { this.limit = limit; }
 	void setDryRun(final boolean dryRun) { this.dryRun = dryRun; }
 	void setParallelism(final int parallelism) { this.parallelism = parallelism; }
+	void setAllowShallowRepository(final boolean allow) { this.allowShallowRepository = allow; }
 	void setExcludedFilePatterns(@Nullable final List<String> patterns) { this.excludedFilePatterns = patterns; }
 	void setTranslatableFrontMatterFields(@Nullable final List<String> fields) { this.translatableFrontMatterFields = fields; }
 	void setCustomFrontMatter(@Nullable final Map<String, String> customFrontMatter) { this.customFrontMatter = customFrontMatter; }

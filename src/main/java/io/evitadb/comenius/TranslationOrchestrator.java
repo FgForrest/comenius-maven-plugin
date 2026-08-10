@@ -120,6 +120,15 @@ public final class TranslationOrchestrator {
 		}
 		final CommitInfo commitInfo = commitInfoOpt.get();
 
+		// buildCommitInfo drops a recorded commit this repository cannot reach, which turns the
+		// job into a full retranslation. Say so - the alternative is a document that silently
+		// stops syncing forever.
+		if (translatedCommit != null && commitInfo.translatedCommit() == null) {
+			this.log.warn("[WARN] Recorded commit " + translatedCommit + " for " + relativePath +
+				" is not reachable in this repository (rewritten history, a different clone, or a" +
+				" shallow checkout). Falling back to a full retranslation.");
+		}
+
 		// Check if up-to-date
 		if (commitInfo.isUpToDate()) {
 			return Optional.empty();
