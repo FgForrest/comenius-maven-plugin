@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -1244,6 +1245,135 @@ public class LinkCorrectorTest {
 			(String msg) -> msg.contains("guide.md")
 				&& msg.contains("xyz-abc-completely-unknown")
 		));
+	}
+
+	@Test
+	@DisplayName("keeps a link title out of the path and echoes it back verbatim")
+	public void shouldPreserveLinkTitleWhenCorrectingAssetLink() throws Exception {
+		Files.createDirectories(this.sourceDir.resolve("docs"));
+		Files.createDirectories(this.sourceDir.resolve("images"));
+		writeFile(this.sourceDir.resolve("docs/guide.md"), "# Guide\n![logo](../images/logo.png)");
+		writeFile(this.sourceDir.resolve("images/logo.png"), "PNG");
+
+		Files.createDirectories(this.targetDir.resolve("docs"));
+		final Path translatedFile = this.targetDir.resolve("docs/guide.md");
+		// A CommonMark title carrying spaces and diacritics - it must never reach Path.resolve
+		final String translatedContent =
+			"# Guía\n![logo](../images/logo.png \"Stránka s výpisem kategorií z Alzashop.com\")";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.isSuccess());
+		assertEquals(
+			"# Guía\n![logo](../../../source/images/logo.png"
+				+ " \"Stránka s výpisem kategorií z Alzashop.com\")",
+			result.correctedContent()
+		);
+	}
+
+	@Test
+	@DisplayName("does not truncate a link title containing a question mark")
+	public void shouldPreserveLinkTitleWithQueryCharacter() throws Exception {
+		Files.createDirectories(this.sourceDir.resolve("docs"));
+		Files.createDirectories(this.sourceDir.resolve("images"));
+		writeFile(this.sourceDir.resolve("docs/guide.md"), "# Guide\n![logo](../images/logo.png)");
+		writeFile(this.sourceDir.resolve("images/logo.png"), "PNG");
+
+		Files.createDirectories(this.targetDir.resolve("docs"));
+		final Path translatedFile = this.targetDir.resolve("docs/guide.md");
+		final String translatedContent = "# Guía\n![logo](../images/logo.png \"Is it fast? 100%\")";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertTrue(result.correctedContent().endsWith("\"Is it fast? 100%\")"),
+			"Title was altered: " + result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("keeps an external destination with balanced parentheses intact")
+	public void shouldNotTruncateDestinationWithParentheses() throws Exception {
+		writeFile(this.sourceDir.resolve("guide.md"), "# Guide");
+		final Path translatedFile = this.targetDir.resolve("guide.md");
+		final String translatedContent =
+			"# Guía\n[set](https://en.wikipedia.org/wiki/Set_(mathematics))";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final LinkCorrectionResult result = corrector.correctLinks(translatedFile, translatedContent);
+
+		assertEquals(translatedContent, result.correctedContent());
+	}
+
+	@Test
+	@DisplayName("contains a failure to the offending file instead of discarding every result")
+	public void shouldKeepCorrectingWhenOneFileThrowsRuntimeException() throws Exception {
+		Files.createDirectories(this.sourceDir.resolve("docs"));
+		Files.createDirectories(this.sourceDir.resolve("images"));
+		writeFile(this.sourceDir.resolve("docs/guide.md"), "# Guide\n![logo](../images/logo.png)");
+		writeFile(this.sourceDir.resolve("images/logo.png"), "PNG");
+
+		Files.createDirectories(this.targetDir.resolve("docs"));
+		final Path good = this.targetDir.resolve("docs/guide.md");
+		final Path broken = this.targetDir.resolve("docs/broken.md");
+		// A NUL byte in the destination makes Path.resolve throw InvalidPathException, standing in
+		// for any unchecked failure a single document can provoke
+		final String brokenContent = "# Roto\n![x](../images/a" + '\0' + "b.png)";
+
+		final LinkCorrector corrector = new LinkCorrector(
+			this.sourceDir,
+			this.targetDir,
+			Pattern.compile("(?i).*\\.md"),
+			null,
+			null,
+			this.mockLog
+		);
+
+		final Map<Path, String> files = new LinkedHashMap<>();
+		files.put(broken, brokenContent);
+		files.put(good, "# Guía\n![logo](../images/logo.png)");
+
+		final List<LinkCorrectionResult> results = corrector.correctAllParallel(
+			files, Runnable::run
+		);
+
+		assertEquals(2, results.size());
+		final LinkCorrectionResult brokenResult = results.stream()
+			.filter(r -> r.targetFile().equals(broken))
+			.findFirst()
+			.orElseThrow();
+		final LinkCorrectionResult goodResult = results.stream()
+			.filter(r -> r.targetFile().equals(good))
+			.findFirst()
+			.orElseThrow();
+		assertFalse(brokenResult.isSuccess(), "The offending file must be reported as failed");
+		assertTrue(goodResult.isSuccess(), "The healthy file must still be corrected");
+		assertTrue(goodResult.correctedContent().contains("../../../source/images/logo.png"),
+			"Expected corrected path, got: " + goodResult.correctedContent());
 	}
 
 	private void writeFile(Path path, String content) throws IOException {

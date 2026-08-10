@@ -321,7 +321,7 @@ public class ComeniusMojo extends AbstractMojo {
 		}
 	}
 
-	private void translate(@Nonnull final Log log) {
+	private void translate(@Nonnull final Log log) throws MojoExecutionException {
 		// Validate required parameters
 		if (this.sourceDir == null || this.sourceDir.isBlank()) {
 			log.error("Source directory must be specified for translate action");
@@ -488,7 +488,10 @@ public class ComeniusMojo extends AbstractMojo {
 			}
 
 		} catch (final Exception ex) {
+			// Fail the build. Logging without rethrowing let a crashed link-correction phase
+			// report BUILD SUCCESS, which hid the failure until the log was read by hand.
 			log.error("Failed to execute translate action: " + ex.getMessage(), ex);
+			throw new MojoExecutionException("Translate action failed: " + ex.getMessage(), ex);
 		}
 	}
 

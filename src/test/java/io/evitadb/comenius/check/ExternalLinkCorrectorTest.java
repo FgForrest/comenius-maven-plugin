@@ -515,6 +515,44 @@ public class ExternalLinkCorrectorTest {
 		assertEquals(2, totalCorrections);
 	}
 
+	@Test
+	@DisplayName("keeps the link title when correcting a stale anchor")
+	public void shouldPreserveLinkTitleWhenCorrectingAnchor() {
+		final Path changedFile = this.targetDir.resolve("guide.md")
+			.toAbsolutePath().normalize();
+		final HeadingAnchorIndex oldIndex = indexFrom(
+			"# Introduction\n\n## Quick Start\n\n## Usage"
+		);
+		final HeadingAnchorIndex newIndex = indexFrom(
+			"# Introducción\n\n## Inicio Rápido\n\n## Uso"
+		);
+		final Map<Path, AnchorChangeSet> changedFiles = Map.of(
+			changedFile, new AnchorChangeSet(oldIndex, newIndex)
+		);
+
+		final Path externalFile = this.targetDir.resolve("index.md")
+			.toAbsolutePath().normalize();
+		final String externalContent =
+			"# Índice\n\nSee [guide](guide.md#quick-start \"Průvodce rychlým startem\") for details.";
+		final Map<Path, String> externalFiles = Map.of(externalFile, externalContent);
+
+		final ExternalLinkCorrector corrector = new ExternalLinkCorrector(
+			this.targetDir, null, this.mockLog
+		);
+		final List<LinkCorrectionResult> results = corrector.correctAllParallel(
+			changedFiles, externalFiles, this.executor
+		);
+
+		assertEquals(1, results.size());
+		final LinkCorrectionResult result = results.get(0);
+		assertEquals(1, result.anchorCorrections());
+		assertEquals(
+			"# Índice\n\nSee [guide](guide.md#inicio-rápido \"Průvodce rychlým startem\")"
+				+ " for details.",
+			result.correctedContent()
+		);
+	}
+
 	/**
 	 * Helper to create a HeadingAnchorIndex from markdown string.
 	 */

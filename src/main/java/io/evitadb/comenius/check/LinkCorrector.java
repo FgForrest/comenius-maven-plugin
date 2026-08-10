@@ -35,12 +35,25 @@ import java.util.regex.Pattern;
 public final class LinkCorrector {
 
 	/**
-	 * Pattern to match markdown links: `[text](destination)` or `![alt](destination)`.
+	 * Pattern to match markdown links: `[text](destination)` or `![alt](destination "title")`.
+	 *
+	 * CommonMark allows an optional title after the destination, delimited by double quotes,
+	 * single quotes or parentheses. The title is natural language - it may contain spaces,
+	 * accented characters and punctuation - so it must never be treated as part of the path.
+	 * Capturing it separately is what keeps `Path.resolve` from being handed a sentence.
+	 *
+	 * The destination itself is either an angle-bracketed form `<a b.md>` (which may contain
+	 * spaces) or a bare run of non-whitespace characters. Bare destinations allow balanced
+	 * parentheses so that links such as `https://en.wikipedia.org/wiki/Set_(mathematics)` are
+	 * captured whole rather than truncated at the first closing bracket.
+	 *
 	 * Group 1: The link prefix including brackets (e.g., `[text]` or `![alt]`)
 	 * Group 2: The link destination
+	 * Group 3: The title including its leading whitespace and delimiters, or null when absent
 	 */
 	private static final Pattern LINK_PATTERN = Pattern.compile(
-		"(!?\\[[^\\]]*\\])\\(([^)]+)\\)"
+		"(!?\\[[^\\]]*\\])\\(\\s*(<[^<>\\n]*>|(?:[^\\s()]|\\([^\\s()]*\\))+)" +
+			"(\\s+(?:\"[^\"]*\"|'[^']*'|\\([^()]*\\)))?\\s*\\)"
 	);
 
 	/**
@@ -149,6 +162,14 @@ public final class LinkCorrector {
 				} catch (IOException e) {
 					this.log.error("Failed to correct links in " + path + ": " + e.getMessage());
 					return LinkCorrectionResult.failed(path, content, "IO error: " + e.getMessage());
+				} catch (RuntimeException e) {
+					// An unexpected failure on one file must not discard the whole phase.
+					// Without this the exception escapes `join()` below, no results are ever
+					// returned, and none of the corrected files get written.
+					this.log.error("Failed to correct links in " + path + ": " + e, e);
+					return LinkCorrectionResult.failed(
+						path, content, e.getClass().getSimpleName() + ": " + e.getMessage()
+					);
 				}
 			}, executor));
 		}
@@ -251,13 +272,32 @@ public final class LinkCorrector {
 			result.append(content, lastEnd, matcher.start());
 
 			final String linkPrefix = matcher.group(1);  // [text] or ![alt]
-			final String destination = matcher.group(2);
+			final String rawDestination = matcher.group(2);
+			// The title is natural language and is never corrected - it is echoed back verbatim
+			final String title = matcher.group(3);
+
+			// Angle-bracketed destinations are unwrapped for correction and re-wrapped after
+			final boolean bracketed = rawDestination.length() > 1
+				&& rawDestination.charAt(0) == '<'
+				&& rawDestination.charAt(rawDestination.length() - 1) == '>';
+			final String destination = bracketed
+				? rawDestination.substring(1, rawDestination.length() - 1)
+				: rawDestination;
 
 			// Correct the link destination
 			final String corrected = correctDestination(destination, context);
 
 			// Reconstruct the link
-			result.append(linkPrefix).append("(").append(corrected).append(")");
+			result.append(linkPrefix).append("(");
+			if (bracketed) {
+				result.append('<').append(corrected).append('>');
+			} else {
+				result.append(corrected);
+			}
+			if (title != null) {
+				result.append(title);
+			}
+			result.append(")");
 
 			lastEnd = matcher.end();
 		}

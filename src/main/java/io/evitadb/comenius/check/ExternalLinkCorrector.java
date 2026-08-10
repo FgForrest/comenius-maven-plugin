@@ -31,12 +31,18 @@ import java.util.regex.Pattern;
 public final class ExternalLinkCorrector {
 
 	/**
-	 * Pattern to match markdown links: `[text](destination)` or `![alt](destination)`.
+	 * Pattern to match markdown links: `[text](destination)` or `![alt](destination "title")`.
+	 *
+	 * Mirrors `LinkCorrector.LINK_PATTERN` - see its documentation for why the optional
+	 * CommonMark title must be captured separately from the destination.
+	 *
 	 * Group 1: The link prefix including brackets (e.g., `[text]` or `![alt]`)
 	 * Group 2: The link destination
+	 * Group 3: The title including its leading whitespace and delimiters, or null when absent
 	 */
 	private static final Pattern LINK_PATTERN = Pattern.compile(
-		"(!?\\[[^\\]]*\\])\\(([^)]+)\\)"
+		"(!?\\[[^\\]]*\\])\\(\\s*(<[^<>\\n]*>|(?:[^\\s()]|\\([^\\s()]*\\))+)" +
+			"(\\s+(?:\"[^\"]*\"|'[^']*'|\\([^()]*\\)))?\\s*\\)"
 	);
 
 	@Nonnull
@@ -97,7 +103,19 @@ public final class ExternalLinkCorrector {
 			final Path file = entry.getKey();
 			final String content = entry.getValue();
 			futures.add(CompletableFuture.supplyAsync(
-				() -> correctAnchorsInFile(file, content, changedFiles),
+				() -> {
+					try {
+						return correctAnchorsInFile(file, content, changedFiles);
+					} catch (RuntimeException e) {
+						// An unexpected failure on one file must not discard the whole phase -
+						// an exception escaping here would propagate out of `join()` below and
+						// leave every other corrected file unwritten.
+						this.log.error("Failed to correct anchors in " + file + ": " + e, e);
+						return LinkCorrectionResult.failed(
+							file, content, e.getClass().getSimpleName() + ": " + e.getMessage()
+						);
+					}
+				},
 				executor
 			));
 		}
@@ -195,13 +213,32 @@ public final class ExternalLinkCorrector {
 			result.append(content, lastEnd, matcher.start());
 
 			final String linkPrefix = matcher.group(1);
-			final String destination = matcher.group(2);
+			final String rawDestination = matcher.group(2);
+			// The title is natural language and is never corrected - it is echoed back verbatim
+			final String title = matcher.group(3);
+
+			// Angle-bracketed destinations are unwrapped for correction and re-wrapped after
+			final boolean bracketed = rawDestination.length() > 1
+				&& rawDestination.charAt(0) == '<'
+				&& rawDestination.charAt(rawDestination.length() - 1) == '>';
+			final String destination = bracketed
+				? rawDestination.substring(1, rawDestination.length() - 1)
+				: rawDestination;
 
 			final String corrected = correctDestination(
 				destination, fromFile, changedFiles, context
 			);
 
-			result.append(linkPrefix).append("(").append(corrected).append(")");
+			result.append(linkPrefix).append("(");
+			if (bracketed) {
+				result.append('<').append(corrected).append('>');
+			} else {
+				result.append(corrected);
+			}
+			if (title != null) {
+				result.append(title);
+			}
+			result.append(")");
 			lastEnd = matcher.end();
 		}
 
