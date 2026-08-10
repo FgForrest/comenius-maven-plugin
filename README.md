@@ -102,6 +102,9 @@ the front matter of the whole corpus.
 Run `git fetch --unshallow` before translating, or pass
 `-Dcomenius.allowShallowRepository=true` to accept the wrong provenance deliberately.
 
+Only `translate` is guarded — `check`, `fix-links` and `fix-structure` run unaffected in a shallow
+clone, because none of them writes the `commit:` field.
+
 If a recorded `commit:` value cannot be found in the repository at all — history was rewritten, or
 the translation came from a different clone — the file is retranslated in full with a warning
 instead of failing.
